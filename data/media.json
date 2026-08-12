@@ -1,0 +1,28 @@
+[
+  {
+    "id": "msq7uvxrltlr294j",
+    "fileId": "BAACAgIAAxkBAAMGanyERTKOqoe6eZ4iUCn_G-LfyRgAAguyAALT2-BLPh9bU4u6BTo9BA",
+    "chatId": "8194599016",
+    "messageId": 20,
+    "type": "video",
+    "fileSize": 1412609032,
+    "mimeType": "video/mp4",
+    "width": 1280,
+    "height": 536,
+    "duration": 1859,
+    "createdAt": "2026-08-12T15:00:34.479Z",
+    "updatedAt": "2026-08-12T15:00:34.479Z"
+  },
+  {
+    "id": "msq7vvmitymj68fx",
+    "fileId": "AgACAgIAAxkBAAMWanyKwJHr_sG-5WYLu7ZULC3blesAAqAWaxvZ6OhLX4mA6TdH4O4BAAMCAAN5AAM9BA",
+    "chatId": "8194599016",
+    "messageId": 22,
+    "type": "photo",
+    "fileSize": 288333,
+    "width": 1280,
+    "height": 853,
+    "createdAt": "2026-08-12T15:01:20.730Z",
+    "updatedAt": "2026-08-12T15:01:20.730Z"
+  }
+]
