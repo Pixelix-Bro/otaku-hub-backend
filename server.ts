@@ -1,26 +1,11 @@
 import 'dotenv/config'
 
-import express, {
-  type Request,
-  type Response,
-} from 'express'
-
+import express from 'express'
 import cors from 'cors'
-
 import { Bot } from 'grammy'
-
-import {
-  TelegramClient,
-} from 'telegram'
-
-import {
-  StringSession,
-} from 'telegram/sessions'
-
+import { TelegramClient } from 'telegram'
+import { StringSession } from 'telegram/sessions'
 import bigInt from 'big-integer'
-
-import fs from 'node:fs/promises'
-import path from 'node:path'
 
 // ======================================================
 // CONFIG
@@ -28,86 +13,45 @@ import path from 'node:path'
 
 const TOKEN = process.env.TOKEN
 
-const API_ID = Number(
-  process.env.API_ID,
-)
+const API_ID = Number(process.env.API_ID)
+const API_HASH = process.env.API_HASH
 
-const API_HASH =
-  process.env.API_HASH
+const PORT = Number(process.env.PORT) || 3050
 
-const PORT =
-  Number(process.env.PORT) || 3050
-
-const PUBLIC_URL =
-  process.env.PUBLIC_URL ||
-  `http://localhost:${PORT}`
-
-// ======================================================
-// CHECK ENV
-// ======================================================
+const PUBLIC_URL = (
+  process.env.PUBLIC_URL || `http://localhost:${PORT}`
+).replace(/\/+$/, '')
 
 if (!TOKEN) {
-  throw new Error(
-    '❌ TOKEN topilmadi!',
-  )
+  throw new Error('❌ TOKEN topilmadi!')
 }
 
 if (!API_ID) {
-  throw new Error(
-    '❌ API_ID topilmadi!',
-  )
+  throw new Error('❌ API_ID topilmadi!')
 }
 
 if (!API_HASH) {
-  throw new Error(
-    '❌ API_HASH topilmadi!',
-  )
+  throw new Error('❌ API_HASH topilmadi!')
 }
 
 // ======================================================
-// STORAGE
+// PERFORMANCE CONFIG
 // ======================================================
 
-const DATA_DIR =
-  path.resolve('./data')
+// Bitta chunk
+const CHUNK_SIZE = 16 * 1024 * 1024 // 16 MB
 
-const MEDIA_FILE =
-  path.join(
-    DATA_DIR,
-    'media.json',
-  )
+// RAM cache maksimal hajmi
+const MAX_CACHE_BYTES = 512 * 1024 * 1024 // 512 MB
 
-const SESSION_FILE =
-  path.join(
-    DATA_DIR,
-    'session.txt',
-  )
+// Bir vaqtning o'zida Telegram'dan nechta download
+const MAX_TELEGRAM_DOWNLOADS = 2
 
-// ======================================================
-// PERFORMANCE
-// ======================================================
+// Telegram request chunk size
+const TELEGRAM_REQUEST_SIZE = 1024 * 1024 // 1 MB
 
-// Bitta cache chunk.
-// 32 MB.
-const CHUNK_SIZE =
-  32 * 1024 * 1024
-
-// Browser so'ragan chunkdan keyingi
-// nechta chunkni oldindan yuklash.
-const PREFETCH_CHUNKS = 3
-
-// RAM cache maksimal hajmi.
-// 1.5 GB.
-const MAX_CACHE_SIZE =
-  1536 * 1024 * 1024
-
-// Telegram request chunk.
-const TELEGRAM_REQUEST_SIZE =
-  512 * 1024
-
-// Bir vaqtning o'zida nechta
-// Telegram download bo'lishi mumkin.
-const MAX_PARALLEL_DOWNLOADS = 6
+// Cache qancha vaqt saqlansin
+const CACHE_TTL = 10 * 60 * 1000 // 10 min
 
 // ======================================================
 // EXPRESS
@@ -118,86 +62,38 @@ const app = express()
 app.use(
   cors({
     origin: '*',
-
-    methods: [
-      'GET',
-      'HEAD',
-      'OPTIONS',
-    ],
-
-    allowedHeaders: [
-      'Range',
-      'Content-Type',
-      'If-Range',
-      'If-None-Match',
-    ],
-
-    exposedHeaders: [
-      'Content-Length',
-      'Content-Range',
-      'Accept-Ranges',
-      'Content-Type',
-      'ETag',
-      'Cache-Control',
-      'Last-Modified',
-    ],
+    methods: ['GET', 'HEAD', 'OPTIONS'],
   }),
 )
 
-app.use(
-  express.json({
-    limit: '1mb',
-  }),
+app.use(express.json())
+
+// ======================================================
+// GRAMMY
+// ======================================================
+
+const bot = new Bot(TOKEN)
+
+// ======================================================
+// TELEGRAM MTProto
+// ======================================================
+
+const session = new StringSession('')
+
+const client = new TelegramClient(
+  session,
+  API_ID,
+  API_HASH,
+  {
+    connectionRetries: 5,
+  },
 )
-
-// ======================================================
-// BOT
-// ======================================================
-
-const bot =
-  new Bot(TOKEN)
-
-// ======================================================
-// TELEGRAM
-// ======================================================
-
-let savedSession = ''
-
-try {
-  savedSession =
-    (
-      await fs.readFile(
-        SESSION_FILE,
-        'utf8',
-      )
-    ).trim()
-} catch {
-  savedSession = ''
-}
-
-const session =
-  new StringSession(
-    savedSession,
-  )
-
-const client =
-  new TelegramClient(
-    session,
-    API_ID,
-    API_HASH,
-    {
-      connectionRetries: 10,
-      requestRetries: 5,
-    },
-  )
 
 // ======================================================
 // TYPES
 // ======================================================
 
-type MediaType =
-  | 'video'
-  | 'photo'
+type MediaType = 'video' | 'photo'
 
 type MediaRecord = {
   id: string
@@ -221,128 +117,54 @@ type MediaRecord = {
   height?: number
 
   duration?: number
-
-  createdAt: string
-
-  updatedAt: string
 }
 
 // ======================================================
-// DATABASE
+// MEDIA DATABASE
 // ======================================================
 
-const mediaDB =
-  new Map<
-    string,
-    MediaRecord
-  >()
+const mediaDB = new Map<string, MediaRecord>()
 
 // ======================================================
-// DATABASE SAVE QUEUE
+// CACHE TYPES
 // ======================================================
 
-let saveQueue =
-  Promise.resolve()
+type CacheEntry = {
+  key: string
 
-// ======================================================
-// PREPARE DATA
-// ======================================================
+  buffer: Buffer
 
-async function prepareData() {
-  await fs.mkdir(
-    DATA_DIR,
-    {
-      recursive: true,
-    },
-  )
+  createdAt: number
 
-  try {
-    await fs.access(
-      MEDIA_FILE,
-    )
-  } catch {
-    await fs.writeFile(
-      MEDIA_FILE,
-      '[]',
-      'utf8',
-    )
-  }
+  lastAccess: number
+
+  size: number
 }
 
-// ======================================================
-// LOAD DATABASE
-// ======================================================
+const cache = new Map<string, CacheEntry>()
 
-async function loadDatabase() {
-  try {
-    const raw =
-      await fs.readFile(
-        MEDIA_FILE,
-        'utf8',
-      )
-
-    const records =
-      JSON.parse(
-        raw,
-      ) as MediaRecord[]
-
-    mediaDB.clear()
-
-    for (
-      const record of records
-    ) {
-      mediaDB.set(
-        record.id,
-        record,
-      )
-    }
-
-    console.log(
-      `💾 ${mediaDB.size} ta media yuklandi`,
-    )
-  } catch (error) {
-    console.error(
-      '❌ Media database error:',
-      error,
-    )
-  }
-}
+let cacheBytes = 0
 
 // ======================================================
-// SAVE DATABASE
+// ACTIVE DOWNLOADS
 // ======================================================
 
-async function saveDatabase() {
-  const records =
-    Array.from(
-      mediaDB.values(),
-    )
+// Bir xil chunkni 10 user so'rasa,
+// Telegram'ga 10 ta request yubormaymiz.
+//
+// Bitta Promise ishlaydi va hamma shu Promise'ni kutadi.
 
-  saveQueue =
-    saveQueue.then(
-      async () => {
-        const temp =
-          `${MEDIA_FILE}.tmp`
+const activeDownloads = new Map<string, Promise<Buffer>>()
 
-        await fs.writeFile(
-          temp,
-          JSON.stringify(
-            records,
-            null,
-            2,
-          ),
-          'utf8',
-        )
+// ======================================================
+// DOWNLOAD QUEUE
+// ======================================================
 
-        await fs.rename(
-          temp,
-          MEDIA_FILE,
-        )
-      },
-    )
+let activeTelegramDownloads = 0
 
-  return saveQueue
-}
+const downloadQueue: Array<{
+  task: () => Promise<void>
+}> = []
 
 // ======================================================
 // ID
@@ -351,346 +173,232 @@ async function saveDatabase() {
 function createMediaId() {
   return (
     Date.now().toString(36) +
-    Math.random()
-      .toString(36)
-      .slice(2, 10)
+    Math.random().toString(36).slice(2, 10)
   )
 }
 
 // ======================================================
-// FIND MESSAGE
+// CACHE SIZE
 // ======================================================
 
-function findByMessage(
-  chatId: string,
-  messageId: number,
-) {
-  for (
-    const media of mediaDB.values()
-  ) {
-    if (
-      media.chatId === chatId &&
-      media.messageId === messageId
-    ) {
-      return media
-    }
-  }
-
-  return undefined
+function getCacheSizeMB() {
+  return cacheBytes / 1024 / 1024
 }
 
 // ======================================================
-// FIND FILE ID
+// REMOVE CACHE
 // ======================================================
 
-function findByFileId(
-  fileId: string,
-) {
-  for (
-    const media of mediaDB.values()
-  ) {
-    if (
-      media.fileId === fileId
-    ) {
-      return media
-    }
-  }
-
-  return undefined
-}
-
-// ======================================================
-// ======================================================
-// RAM CACHE
-// ======================================================
-// ======================================================
-
-type CacheEntry = {
-  key: string
-
-  mediaId: string
-
-  chunkIndex: number
-
-  start: number
-
-  end: number
-
-  data: Buffer
-
-  size: number
-
-  createdAt: number
-
-  lastAccess: number
-}
-
-// ======================================================
-// CACHE
-// ======================================================
-
-const cache =
-  new Map<
-    string,
-    CacheEntry
-  >()
-
-let cacheSize = 0
-
-// ======================================================
-// CACHE KEY
-// ======================================================
-
-function createCacheKey(
-  mediaId: string,
-  chunkIndex: number,
-) {
-  return `${mediaId}:${chunkIndex}`
-}
-
-// ======================================================
-// CACHE GET
-// ======================================================
-
-function getCache(
-  key: string,
-) {
-  const entry =
-    cache.get(key)
-
-  if (!entry) {
-    return undefined
-  }
-
-  entry.lastAccess =
-    Date.now()
-
-  // LRU uchun oxiriga ko'chiramiz.
-  cache.delete(key)
-
-  cache.set(
-    key,
-    entry,
-  )
-
-  return entry
-}
-
-// ======================================================
-// CACHE DELETE
-// ======================================================
-
-function deleteCache(
-  key: string,
-) {
-  const entry =
-    cache.get(key)
+function removeCache(key: string) {
+  const entry = cache.get(key)
 
   if (!entry) {
     return
   }
 
-  cacheSize -=
-    entry.size
+  cacheBytes -= entry.size
 
   cache.delete(key)
 }
 
 // ======================================================
-// CACHE CLEANUP
+// CLEAN CACHE
 // ======================================================
 
-function cleanupCache(
-  requiredSize = 0,
-) {
-  while (
-    cacheSize +
-      requiredSize >
-      MAX_CACHE_SIZE &&
-    cache.size > 0
-  ) {
-    const first =
-      cache.entries().next()
-        .value as
-        | [string, CacheEntry]
-        | undefined
+function cleanExpiredCache() {
+  const now = Date.now()
+
+  for (const [key, entry] of cache) {
+    if (now - entry.createdAt > CACHE_TTL) {
+      removeCache(key)
+    }
+  }
+}
+
+// ======================================================
+// LRU CACHE
+// ======================================================
+
+function setCache(key: string, buffer: Buffer) {
+  cleanExpiredCache()
+
+  if (buffer.length > MAX_CACHE_BYTES) {
+    return
+  }
+
+  // Agar mavjud bo'lsa
+  removeCache(key)
+
+  const entry: CacheEntry = {
+    key,
+
+    buffer,
+
+    createdAt: Date.now(),
+
+    lastAccess: Date.now(),
+
+    size: buffer.length,
+  }
+
+  cache.set(key, entry)
+
+  cacheBytes += buffer.length
+
+  // Eng eski entry'larni o'chiramiz
+  while (cacheBytes > MAX_CACHE_BYTES) {
+    const first = cache.keys().next().value
 
     if (!first) {
       break
     }
 
-    const [
-      key,
-    ] = first
-
-    deleteCache(key)
+    removeCache(first)
   }
 }
 
 // ======================================================
-// CACHE SET
+// GET CACHE
 // ======================================================
 
-function setCache(
-  entry: CacheEntry,
+function getCache(key: string) {
+  cleanExpiredCache()
+
+  const entry = cache.get(key)
+
+  if (!entry) {
+    return null
+  }
+
+  entry.lastAccess = Date.now()
+
+  // LRU uchun oxiriga o'tkazamiz
+  cache.delete(key)
+
+  cache.set(key, entry)
+
+  return entry.buffer
+}
+
+// ======================================================
+// CACHE KEY
+// ======================================================
+
+function createChunkKey(
+  mediaId: string,
+  start: number,
 ) {
-  cleanupCache(
-    entry.size,
-  )
-
-  const old =
-    cache.get(
-      entry.key,
-    )
-
-  if (old) {
-    cacheSize -=
-      old.size
-  }
-
-  cache.delete(
-    entry.key,
-  )
-
-  cache.set(
-    entry.key,
-    entry,
-  )
-
-  cacheSize +=
-    entry.size
+  return `${mediaId}:${start}`
 }
 
 // ======================================================
-// CACHE INFO
+// DOWNLOAD QUEUE RUNNER
 // ======================================================
-
-function getCacheInfo() {
-  return {
-    entries:
-      cache.size,
-
-    bytes:
-      cacheSize,
-
-    mb:
-      Number(
-        (
-          cacheSize /
-          1024 /
-          1024
-        ).toFixed(2),
-      ),
-
-    maxMb:
-      Number(
-        (
-          MAX_CACHE_SIZE /
-          1024 /
-          1024
-        ).toFixed(2),
-      ),
-  }
-}
-
-// ======================================================
-// DOWNLOAD LOCK
-// ======================================================
-
-// Bir chunk birinchi marta yuklanayotganda
-// boshqa user yana shu chunkni so'rasa
-// Telegramga ikkinchi request yubormaymiz.
-
-const downloading =
-  new Map<
-    string,
-    Promise<Buffer>
-  >()
-
-// ======================================================
-// DOWNLOAD QUEUE
-// ======================================================
-
-let activeDownloads = 0
-
-const waitingDownloads:
-  Array<{
-    task: () => void
-  }> = []
-
-function runDownloadTask(
-  task: () => Promise<void>,
-) {
-  return new Promise<void>(
-    (resolve, reject) => {
-      const execute =
-        async () => {
-          activeDownloads++
-
-          try {
-            await task()
-
-            resolve()
-          } catch (error) {
-            reject(error)
-          } finally {
-            activeDownloads--
-
-            processDownloadQueue()
-          }
-        }
-
-      if (
-        activeDownloads <
-        MAX_PARALLEL_DOWNLOADS
-      ) {
-        void execute()
-      } else {
-        waitingDownloads.push({
-          task: execute,
-        })
-      }
-    },
-  )
-}
 
 function processDownloadQueue() {
   while (
-    activeDownloads <
-      MAX_PARALLEL_DOWNLOADS &&
-    waitingDownloads.length >
-      0
+    activeTelegramDownloads <
+      MAX_TELEGRAM_DOWNLOADS &&
+    downloadQueue.length > 0
   ) {
-    const item =
-      waitingDownloads.shift()
+    const item = downloadQueue.shift()
 
     if (!item) {
       break
     }
 
-    void item.task()
+    activeTelegramDownloads++
+
+    item.task()
+      .catch(() => {})
+      .finally(() => {
+        activeTelegramDownloads--
+
+        processDownloadQueue()
+      })
   }
 }
 
 // ======================================================
-// TELEGRAM MESSAGE
+// QUEUE TELEGRAM DOWNLOAD
+// ======================================================
+
+function queueTelegramDownload(
+  task: () => Promise<Buffer>,
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    downloadQueue.push({
+      task: async () => {
+        try {
+          const result = await task()
+
+          resolve(result)
+        } catch (error) {
+          reject(error)
+        }
+      },
+    })
+
+    processDownloadQueue()
+  })
+}
+
+// ======================================================
+// LOG MEDIA
+// ======================================================
+
+function logMedia(media: MediaRecord) {
+  console.log('')
+
+  console.log('======================================')
+
+  console.log(
+    media.type === 'video'
+      ? '🎬 VIDEO SAQLANDI'
+      : '🖼 PHOTO SAQLANDI',
+  )
+
+  console.log('======================================')
+
+  console.log('ID:', media.id)
+
+  console.log('File ID:', media.fileId)
+
+  console.log('Chat ID:', media.chatId)
+
+  console.log('Message ID:', media.messageId)
+
+  console.log('Size:', media.fileSize)
+
+  console.log('Mime:', media.mimeType)
+
+  console.log('File:', media.fileName)
+
+  console.log(
+    'URL:',
+    `${PUBLIC_URL}/api/${media.type}/${media.id}`,
+  )
+
+  console.log('======================================')
+
+  console.log('')
+}
+
+// ======================================================
+// GET TELEGRAM MESSAGE
 // ======================================================
 
 async function getTelegramMessage(
   media: MediaRecord,
 ) {
-  const messages =
-    await client.getMessages(
-      media.chatId,
-      {
-        ids: [
-          media.messageId,
-        ],
-      },
-    )
+  const messages = await client.getMessages(
+    media.chatId,
+    {
+      ids: [media.messageId],
+    },
+  )
 
-  const message =
-    messages[0]
+  const message = messages[0]
 
   if (!message) {
     throw new Error(
@@ -708,655 +416,503 @@ async function getTelegramMessage(
 }
 
 // ======================================================
-// MEDIA OBJECT CACHE
-// ======================================================
-
-// getMessages()ni har chunk uchun
-// qayta-qayta chaqirmaslik uchun.
-
-const telegramMediaCache =
-  new Map<
-    string,
-    any
-  >()
-
-async function getTelegramMedia(
-  media: MediaRecord,
-) {
-  const cached =
-    telegramMediaCache.get(
-      media.id,
-    )
-
-  if (cached) {
-    return cached
-  }
-
-  const message =
-    await getTelegramMessage(
-      media,
-    )
-
-  const telegramMedia =
-    message.media
-
-  if (!telegramMedia) {
-    throw new Error(
-      'Telegram media yo‘q',
-    )
-  }
-
-  telegramMediaCache.set(
-    media.id,
-    telegramMedia,
-  )
-
-  return telegramMedia
-}
-
-// ======================================================
-// DOWNLOAD CHUNK
+// DOWNLOAD ONE CHUNK
 // ======================================================
 
 async function downloadChunk(
   media: MediaRecord,
-  chunkIndex: number,
+  start: number,
+  end: number,
 ): Promise<Buffer> {
-  const key =
-    createCacheKey(
-      media.id,
-      chunkIndex,
-    )
+  const key = createChunkKey(
+    media.id,
+    start,
+  )
 
-  // ------------------------------------------
-  // RAM CACHE
-  // ------------------------------------------
+  // ====================================================
+  // CACHE
+  // ====================================================
 
-  const cached =
-    getCache(key)
+  const cached = getCache(key)
 
   if (cached) {
-    return cached.data
+    console.log(
+      `⚡ CACHE HIT ${start}-${end}`,
+    )
+
+    return cached
   }
 
-  // ------------------------------------------
-  // ALREADY DOWNLOADING
-  // ------------------------------------------
+  // ====================================================
+  // ACTIVE DOWNLOAD
+  // ====================================================
 
-  const existing =
-    downloading.get(key)
+  const existing = activeDownloads.get(key)
 
   if (existing) {
+    console.log(
+      `⏳ WAIT EXISTING ${start}-${end}`,
+    )
+
     return existing
   }
 
-  // ------------------------------------------
+  // ====================================================
   // DOWNLOAD
-  // ------------------------------------------
+  // ====================================================
 
-  const promise =
-    (async () => {
-      const start =
-        chunkIndex *
-        CHUNK_SIZE
-
-      const end =
-        Math.min(
-          start +
-            CHUNK_SIZE -
-            1,
-          media.fileSize -
-            1,
-        )
-
-      if (
-        start >=
-        media.fileSize
-      ) {
-        return Buffer.alloc(0)
-      }
+  const promise = queueTelegramDownload(
+    async () => {
+      console.log('')
 
       console.log(
-        `⬇️ DOWNLOAD ${media.id} chunk=${chunkIndex} ${start}-${end}`,
+        `⬇️ TELEGRAM CHUNK ${start}-${end}`,
       )
 
-      const telegramMedia =
-        await getTelegramMedia(
-          media,
-        )
+      const message =
+        await getTelegramMessage(media)
 
-      const length =
-        end - start + 1
+      const length = end - start + 1
+
+      const chunks: Buffer[] = []
+
+      let downloaded = 0
 
       const iterator =
         client.iterDownload({
-          file:
-            telegramMedia,
+          file: message.media,
 
-          offset:
-            bigInt(start),
+          offset: bigInt(start),
 
-          limit:
-            bigInt(length),
+          limit: bigInt(length),
 
-          fileSize:
-            bigInt(
-              media.fileSize,
-            ),
+          fileSize: bigInt(
+            media.fileSize,
+          ),
 
           requestSize:
             TELEGRAM_REQUEST_SIZE,
         })
 
-      const buffers:
-        Buffer[] = []
+      for await (const chunk of iterator) {
+        const buffer = Buffer.from(chunk)
 
-      let total = 0
+        const remaining =
+          length - downloaded
 
-      for await (
-        const chunk of iterator
-      ) {
-        const buffer =
-          Buffer.from(chunk)
+        if (remaining <= 0) {
+          break
+        }
 
-        if (
-          buffer.length >
-          0
-        ) {
-          buffers.push(
-            buffer,
-          )
+        const data =
+          buffer.length > remaining
+            ? buffer.subarray(
+                0,
+                remaining,
+              )
+            : buffer
 
-          total +=
-            buffer.length
+        chunks.push(data)
+
+        downloaded += data.length
+
+        if (downloaded >= length) {
+          break
         }
       }
 
-      const result =
-        Buffer.concat(
-          buffers,
-          total,
-        )
-
-      // ------------------------------------------
-      // CACHE
-      // ------------------------------------------
-
-      setCache({
-        key,
-
-        mediaId:
-          media.id,
-
-        chunkIndex,
-
-        start,
-
-        end,
-
-        data:
-          result,
-
-        size:
-          result.length,
-
-        createdAt:
-          Date.now(),
-
-        lastAccess:
-          Date.now(),
-      })
+      const result = Buffer.concat(chunks)
 
       console.log(
-        `✅ CACHED ${media.id} chunk=${chunkIndex} ${result.length} bytes`,
+        `✅ CHUNK ${start}-${end} → ${result.length} bytes`,
       )
 
-      return result
-    })()
+      // Cache
+      setCache(key, result)
 
-  downloading.set(
-    key,
-    promise,
+      return result
+    },
   )
+
+  activeDownloads.set(key, promise)
 
   try {
     return await promise
   } finally {
-    downloading.delete(
-      key,
-    )
+    activeDownloads.delete(key)
   }
 }
 
 // ======================================================
-// QUEUED CHUNK
+// PREFETCH NEXT CHUNK
 // ======================================================
 
-async function getChunk(
+function prefetchNextChunk(
   media: MediaRecord,
-  chunkIndex: number,
+  currentStart: number,
 ) {
-  const key =
-    createCacheKey(
-      media.id,
-      chunkIndex,
-    )
-
-  const cached =
-    getCache(key)
-
-  if (cached) {
-    return cached.data
-  }
-
-  let result:
-    Buffer | undefined
-
-  await runDownloadTask(
-    async () => {
-      result =
-        await downloadChunk(
-          media,
-          chunkIndex,
-        )
-    },
-  )
-
-  return result || Buffer.alloc(0)
-}
-
-// ======================================================
-// PREFETCH
-// ======================================================
-
-function prefetch(
-  media: MediaRecord,
-  currentChunk: number,
-) {
-  for (
-    let i = 1;
-    i <= PREFETCH_CHUNKS;
-    i++
-  ) {
-    const chunkIndex =
-      currentChunk + i
-
-    const start =
-      chunkIndex *
-      CHUNK_SIZE
-
-    if (
-      start >=
-      media.fileSize
-    ) {
-      break
-    }
-
-    const key =
-      createCacheKey(
-        media.id,
-        chunkIndex,
-      )
-
-    if (
-      cache.has(key) ||
-      downloading.has(key)
-    ) {
-      continue
-    }
-
-    // Background download.
-    void runDownloadTask(
-      async () => {
-        try {
-          await downloadChunk(
-            media,
-            chunkIndex,
-          )
-        } catch (error) {
-          console.error(
-            `⚠️ Prefetch error chunk=${chunkIndex}`,
-            error,
-          )
-        }
-      },
-    )
-  }
-}
-
-// ======================================================
-// RANGE PARSER
-// ======================================================
-
-function parseRange(
-  range: string | undefined,
-  totalSize: number,
-) {
-  if (!range) {
-    return {
-      start: 0,
-
-      end:
-        Math.min(
-          totalSize - 1,
-          CHUNK_SIZE - 1,
-        ),
-    }
-  }
-
-  const match =
-    range.match(
-      /^bytes=(\d+)-(\d*)$/,
-    )
-
-  if (!match) {
-    return null
-  }
-
-  const start =
-    Number(
-      match[1],
-    )
-
-  let end =
-    match[2]
-      ? Number(
-          match[2],
-        )
-      : start +
-          CHUNK_SIZE -
-          1
+  const nextStart =
+    currentStart + CHUNK_SIZE
 
   if (
-    !Number.isSafeInteger(
-      start,
-    ) ||
-    !Number.isSafeInteger(
-      end,
-    )
+    nextStart >= media.fileSize
   ) {
-    return null
+    return
   }
 
-  if (
-    start < 0 ||
-    start >= totalSize ||
-    end < start
-  ) {
-    return null
-  }
-
-  end =
-    Math.min(
-      end,
-      totalSize - 1,
-    )
-
-  return {
-    start,
-    end,
-  }
-}
-
-// ======================================================
-// STREAM FROM CACHE
-// ======================================================
-
-async function streamVideo(
-  media: MediaRecord,
-  start: number,
-  end: number,
-  req: Request,
-  res: Response,
-) {
-  let position =
-    start
-
-  while (
-    position <= end
-  ) {
-    if (
-      req.destroyed ||
-      res.destroyed
-    ) {
-      return
-    }
-
-    const chunkIndex =
-      Math.floor(
-        position /
-          CHUNK_SIZE,
-      )
-
-    const chunkStart =
-      chunkIndex *
-      CHUNK_SIZE
-
-    const chunk =
-      await getChunk(
-        media,
-        chunkIndex,
-      )
-
-    if (
-      chunk.length === 0
-    ) {
-      break
-    }
-
-    const from =
-      Math.max(
-        0,
-        position -
-          chunkStart,
-      )
-
-    const to =
-      Math.min(
-        chunk.length,
-        end -
-          chunkStart +
-          1,
-      )
-
-    if (
-      to <= from
-    ) {
-      break
-    }
-
-    const data =
-      chunk.subarray(
-        from,
-        to,
-      )
-
-    const canContinue =
-      res.write(data)
-
-    position =
-      chunkStart +
-      to
-
-    if (
-      !canContinue
-    ) {
-      await new Promise<void>(
-        (
-          resolve,
-        ) => {
-          res.once(
-            'drain',
-            resolve,
-          )
-        },
-      )
-    }
-
-    // Keyingi chunklarni
-    // backgroundda olib kelamiz.
-    if (
-      position >
-      chunkStart
-    ) {
-      prefetch(
-        media,
-        chunkIndex,
-      )
-    }
-  }
-
-  if (
-    !res.destroyed &&
-    !res.writableEnded
-  ) {
-    res.end()
-  }
-}
-
-// ======================================================
-// MEDIA LOG
-// ======================================================
-
-function logMedia(
-  media: MediaRecord,
-) {
-  console.log('')
-
-  console.log(
-    '==========================================',
+  const nextEnd = Math.min(
+    nextStart + CHUNK_SIZE - 1,
+    media.fileSize - 1,
   )
 
-  console.log(
-    media.type === 'video'
-      ? '🎬 VIDEO SAQLANDI'
-      : '🖼 IMAGE SAQLANDI',
-  )
-
-  console.log(
-    'ID:',
+  const key = createChunkKey(
     media.id,
+    nextStart,
   )
 
-  console.log(
-    'File ID:',
-    media.fileId,
-  )
+  if (
+    getCache(key) ||
+    activeDownloads.has(key)
+  ) {
+    return
+  }
 
-  console.log(
-    'Chat:',
-    media.chatId,
-  )
-
-  console.log(
-    'Message:',
-    media.messageId,
-  )
-
-  console.log(
-    'Size:',
-    media.fileSize,
-  )
-
-  console.log(
-    'URL:',
-    `${PUBLIC_URL}/api/${media.type}/${media.id}`,
-  )
-
-  console.log(
-    '==========================================',
-  )
-
-  console.log('')
+  // Background download
+  downloadChunk(
+    media,
+    nextStart,
+    nextEnd,
+  ).catch((error) => {
+    console.error(
+      '⚠️ PREFETCH ERROR:',
+      error?.message || error,
+    )
+  })
 }
 
 // ======================================================
 // HOME
 // ======================================================
 
-app.get(
-  '/',
-  (
-    _req,
-    res,
-  ) => {
-    res.json({
-      success: true,
+app.get('/', (_req, res) => {
+  res.json({
+    success: true,
 
-      message:
-        'Telegram Media API ishlayapti 🚀',
+    message:
+      'Telegram Media API ishlayapti 🚀',
 
-      telegram:
-        client.connected,
+    telegram: client.connected,
 
-      mediaCount:
-        mediaDB.size,
+    mediaCount: mediaDB.size,
 
-      cache:
-        getCacheInfo(),
+    cache: {
+      entries: cache.size,
 
-      storage:
-        'Telegram + RAM cache',
-    })
-  },
-)
+      bytes: cacheBytes,
+
+      mb: Number(
+        getCacheSizeMB().toFixed(2),
+      ),
+
+      maxMb:
+        MAX_CACHE_BYTES /
+        1024 /
+        1024,
+    },
+
+    activeDownloads:
+      activeTelegramDownloads,
+
+    queuedDownloads:
+      downloadQueue.length,
+  })
+})
 
 // ======================================================
 // HEALTH
 // ======================================================
 
-app.get(
-  '/health',
-  (
-    _req,
-    res,
-  ) => {
-    res.json({
-      success: true,
+app.get('/health', (_req, res) => {
+  res.json({
+    success: true,
 
-      telegram:
-        client.connected,
+    telegram: client.connected,
 
-      mediaCount:
-        mediaDB.size,
+    mediaCount: mediaDB.size,
 
-      cache:
-        getCacheInfo(),
+    cache: {
+      entries: cache.size,
 
-      activeDownloads,
+      bytes: cacheBytes,
 
-      maxParallelDownloads:
-        MAX_PARALLEL_DOWNLOADS,
+      mb: Number(
+        getCacheSizeMB().toFixed(2),
+      ),
 
-      uptime:
-        process.uptime(),
-    })
-  },
-)
+      maxMb:
+        MAX_CACHE_BYTES /
+        1024 /
+        1024,
+    },
+
+    activeDownloads:
+      activeTelegramDownloads,
+
+    queuedDownloads:
+      downloadQueue.length,
+
+    activeChunkDownloads:
+      activeDownloads.size,
+
+    uptime: process.uptime(),
+  })
+})
 
 // ======================================================
 // MEDIA LIST
 // ======================================================
 
-app.get(
-  '/api/media',
-  (
-    _req,
-    res,
-  ) => {
-    return res.json({
-      success: true,
+app.get('/api/media', (_req, res) => {
+  return res.json({
+    success: true,
 
-      count:
-        mediaDB.size,
+    count: mediaDB.size,
 
-      media:
-        Array.from(
-          mediaDB.values(),
-        ),
-    })
-  },
-)
+    media: [...mediaDB.values()].map(
+      (media) => ({
+        id: media.id,
+
+        type: media.type,
+
+        fileId: media.fileId,
+
+        chatId: media.chatId,
+
+        messageId:
+          media.messageId,
+
+        fileSize:
+          media.fileSize,
+
+        mimeType:
+          media.mimeType,
+
+        fileName:
+          media.fileName,
+      }),
+    ),
+  })
+})
+
+// ======================================================
+// TELEGRAM MESSAGE RECEIVER
+// ======================================================
+
+bot.on('message', async (ctx) => {
+  try {
+    const message = ctx.message
+
+    console.log('')
+
+    console.log(
+      '======================================',
+    )
+
+    console.log('📩 TELEGRAM MESSAGE')
+
+    console.log(
+      'Chat ID:',
+      ctx.chat.id,
+    )
+
+    console.log(
+      'Message ID:',
+      message.message_id,
+    )
+
+    // ==================================================
+    // VIDEO
+    // ==================================================
+
+    if ('video' in message) {
+      const video = message.video
+
+      const id = createMediaId()
+
+      const media: MediaRecord = {
+        id,
+
+        fileId:
+          video.file_id,
+
+        chatId:
+          String(ctx.chat.id),
+
+        messageId:
+          message.message_id,
+
+        type: 'video',
+
+        fileSize:
+          video.file_size ?? 0,
+
+        mimeType:
+          video.mime_type ||
+          'video/mp4',
+
+        fileName:
+          video.file_name,
+
+        width:
+          video.width,
+
+        height:
+          video.height,
+
+        duration:
+          video.duration,
+      }
+
+      mediaDB.set(id, media)
+
+      logMedia(media)
+
+      await ctx.reply(
+        `🎬 VIDEO TAYYOR!\n\n` +
+          `🆔 Media ID:\n${id}\n\n` +
+          `📦 Hajmi:\n${media.fileSize} bytes\n\n` +
+          `🎞 MIME:\n${media.mimeType}\n\n` +
+          `🔗 Video URL:\n${PUBLIC_URL}/api/video/${id}`,
+      )
+
+      return
+    }
+
+    // ==================================================
+    // DOCUMENT VIDEO
+    // ==================================================
+
+    if ('document' in message) {
+      const document =
+        message.document
+
+      const mime =
+        document.mime_type || ''
+
+      const fileName =
+        document.file_name || ''
+
+      const isVideo =
+        mime.startsWith('video/') ||
+        /\.(mp4|mkv|webm|mov|avi)$/i.test(
+          fileName,
+        )
+
+      if (!isVideo) {
+        await ctx.reply(
+          '📦 Document keldi, lekin video emas.',
+        )
+
+        return
+      }
+
+      const id = createMediaId()
+
+      const media: MediaRecord = {
+        id,
+
+        fileId:
+          document.file_id,
+
+        chatId:
+          String(ctx.chat.id),
+
+        messageId:
+          message.message_id,
+
+        type: 'video',
+
+        fileSize:
+          document.file_size ?? 0,
+
+        mimeType:
+          mime || 'video/mp4',
+
+        fileName,
+      }
+
+      mediaDB.set(id, media)
+
+      logMedia(media)
+
+      await ctx.reply(
+        `🎬 VIDEO FILE TAYYOR!\n\n` +
+          `🆔 Media ID:\n${id}\n\n` +
+          `📦 Hajmi:\n${media.fileSize} bytes\n\n` +
+          `🎞 MIME:\n${media.mimeType}\n\n` +
+          `📁 File:\n${media.fileName}\n\n` +
+          `🔗 Video URL:\n${PUBLIC_URL}/api/video/${id}`,
+      )
+
+      return
+    }
+
+    // ==================================================
+    // PHOTO
+    // ==================================================
+
+    if ('photo' in message) {
+      const photos =
+        message.photo
+
+      const photo =
+        photos[photos.length - 1]
+
+      const id = createMediaId()
+
+      const media: MediaRecord = {
+        id,
+
+        fileId:
+          photo.file_id,
+
+        chatId:
+          String(ctx.chat.id),
+
+        messageId:
+          message.message_id,
+
+        type: 'photo',
+
+        fileSize:
+          photo.file_size ?? 0,
+
+        width:
+          photo.width,
+
+        height:
+          photo.height,
+      }
+
+      mediaDB.set(id, media)
+
+      logMedia(media)
+
+      await ctx.reply(
+        `🖼 RASM TAYYOR!\n\n` +
+          `🆔 Media ID:\n${id}\n\n` +
+          `🔗 Image URL:\n${PUBLIC_URL}/api/image/${id}`,
+      )
+
+      return
+    }
+  } catch (error) {
+    console.error(
+      '❌ MESSAGE ERROR:',
+      error,
+    )
+  }
+})
 
 // ======================================================
 // MEDIA INFO
@@ -1364,24 +920,19 @@ app.get(
 
 app.get(
   '/api/media/:id',
-  (
-    req,
-    res,
-  ) => {
+  (req, res) => {
     const media =
       mediaDB.get(
         req.params.id,
       )
 
     if (!media) {
-      return res
-        .status(404)
-        .json({
-          success: false,
+      return res.status(404).json({
+        success: false,
 
-          message:
-            'Media topilmadi',
-        })
+        message:
+          'Media topilmadi',
+      })
     }
 
     return res.json({
@@ -1401,10 +952,7 @@ app.get(
 
 app.get(
   '/api/video/:id',
-  async (
-    req,
-    res,
-  ) => {
+  async (req, res) => {
     try {
       const media =
         mediaDB.get(
@@ -1414,65 +962,231 @@ app.get(
       if (!media) {
         return res
           .status(404)
-          .send(
-            'Video topilmadi',
-          )
+          .send('Video topilmadi')
       }
 
       if (
-        media.type !==
-        'video'
+        media.type !== 'video'
       ) {
         return res
           .status(400)
-          .send(
-            'Bu video emas',
-          )
+          .send('Bu video emas')
       }
 
       const totalSize =
-        media.fileSize
+        Number(media.fileSize)
 
       if (
+        !Number.isFinite(
+          totalSize,
+        ) ||
         totalSize <= 0
       ) {
         return res
           .status(500)
           .send(
-            'Video size noto‘g‘ri',
+            'Video hajmi noto‘g‘ri',
           )
       }
 
       const range =
-        parseRange(
-          req.headers.range,
-          totalSize,
-        )
+        req.headers.range
 
-      if (!range) {
-        res.setHeader(
-          'Content-Range',
-          `bytes */${totalSize}`,
-        )
+      let start = 0
 
-        return res
-          .status(416)
-          .end()
+      let end = Math.min(
+        CHUNK_SIZE - 1,
+        totalSize - 1,
+      )
+
+      // ==================================================
+      // RANGE
+      // ==================================================
+
+      if (range) {
+        const match =
+          range.match(
+            /^bytes=(\d+)-(\d*)$/,
+          )
+
+        if (!match) {
+          res.setHeader(
+            'Content-Range',
+            `bytes */${totalSize}`,
+          )
+
+          return res
+            .status(416)
+            .end()
+        }
+
+        start =
+          Number(match[1])
+
+        if (match[2]) {
+          end =
+            Number(match[2])
+        } else {
+          end = Math.min(
+            start +
+              CHUNK_SIZE -
+              1,
+
+            totalSize - 1,
+          )
+        }
+
+        if (
+          start < 0 ||
+          start >= totalSize ||
+          start > end
+        ) {
+          res.setHeader(
+            'Content-Range',
+            `bytes */${totalSize}`,
+          )
+
+          return res
+            .status(416)
+            .end()
+        }
+
+        end = Math.min(
+          end,
+          totalSize - 1,
+        )
       }
 
-      const {
-        start,
-        end,
-      } = range
+      // ==================================================
+      // LIMIT RANGE
+      // ==================================================
 
-      const length =
-        end - start + 1
+      // Browser juda katta range so'rasa,
+      // faqat CHUNK_SIZE yuboramiz.
+
+      if (
+        end - start + 1 >
+        CHUNK_SIZE
+      ) {
+        end =
+          start +
+          CHUNK_SIZE -
+          1
+
+        end = Math.min(
+          end,
+          totalSize - 1,
+        )
+      }
+
+      // ==================================================
+      // CHUNK ALIGNMENT
+      // ==================================================
+
+      const chunkStart =
+        Math.floor(
+          start / CHUNK_SIZE,
+        ) * CHUNK_SIZE
+
+      const chunkEnd =
+        Math.min(
+          chunkStart +
+            CHUNK_SIZE -
+            1,
+
+          totalSize - 1,
+        )
+
+      console.log('')
+
+      console.log(
+        '======================================',
+      )
+
+      console.log(
+        '🎥 VIDEO REQUEST',
+      )
+
+      console.log(
+        'ID:',
+        media.id,
+      )
+
+      console.log(
+        'Requested:',
+        `${start}-${end}`,
+      )
+
+      console.log(
+        'Chunk:',
+        `${chunkStart}-${chunkEnd}`,
+      )
+
+      console.log(
+        'Range:',
+        range || 'none',
+      )
+
+      // ==================================================
+      // GET CHUNK
+      // ==================================================
+
+      const chunk =
+        await downloadChunk(
+          media,
+          chunkStart,
+          chunkEnd,
+        )
+
+      if (
+        !chunk ||
+        chunk.length === 0
+      ) {
+        return res
+          .status(500)
+          .send(
+            'Video chunk bo‘sh',
+          )
+      }
+
+      // ==================================================
+      // SLICE REQUEST
+      // ==================================================
+
+      const relativeStart =
+        start - chunkStart
+
+      const relativeEnd =
+        Math.min(
+          end - chunkStart,
+          chunk.length - 1,
+        )
+
+      if (
+        relativeStart < 0 ||
+        relativeStart >=
+          chunk.length
+      ) {
+        return res
+          .status(500)
+          .send(
+            'Chunk range xatosi',
+          )
+      }
+
+      const data =
+        chunk.subarray(
+          relativeStart,
+          relativeEnd + 1,
+        )
 
       // ==================================================
       // HEADERS
       // ==================================================
 
-      res.status(206)
+      res.status(
+        range ? 206 : 200,
+      )
 
       res.setHeader(
         'Content-Type',
@@ -1487,12 +1201,12 @@ app.get(
 
       res.setHeader(
         'Content-Length',
-        String(length),
+        String(data.length),
       )
 
       res.setHeader(
         'Content-Range',
-        `bytes ${start}-${end}/${totalSize}`,
+        `bytes ${start}-${start + data.length - 1}/${totalSize}`,
       )
 
       res.setHeader(
@@ -1506,68 +1220,44 @@ app.get(
       )
 
       res.setHeader(
-        'X-Content-Type-Options',
-        'nosniff',
+        'X-Cache-Size',
+        `${getCacheSizeMB().toFixed(2)}MB`,
       )
 
       // ==================================================
-      // DETERMINE CHUNK
+      // SEND
       // ==================================================
 
-      const chunkIndex =
-        Math.floor(
-          start /
-            CHUNK_SIZE,
-        )
+      res.end(data)
+
+      // ==================================================
+      // PREFETCH
+      // ==================================================
+
+      prefetchNextChunk(
+        media,
+        chunkStart,
+      )
+
+      console.log(
+        `⚡ SENT ${data.length} bytes`,
+      )
+
+      console.log(
+        '======================================',
+      )
 
       console.log('')
-
-      console.log(
-        '🎥 VIDEO',
-      )
-
-      console.log(
-        'ID:',
-        media.id,
-      )
-
-      console.log(
-        `Range: ${start}-${end}`,
-      )
-
-      console.log(
-        `Chunk: ${chunkIndex}`,
-      )
-
-      console.log(
-        `Cache: ${getCacheInfo().mb} MB`,
-      )
-
-      // ==================================================
-      // PREFETCH IMMEDIATELY
-      // ==================================================
-
-      prefetch(
-        media,
-        chunkIndex,
-      )
-
-      // ==================================================
-      // STREAM
-      // ==================================================
-
-      await streamVideo(
-        media,
-        start,
-        end,
-        req,
-        res,
-      )
     } catch (error) {
+      console.error('')
+
       console.error(
-        '❌ VIDEO ERROR:',
-        error,
+        '❌ VIDEO ERROR',
       )
+
+      console.error(error)
+
+      console.error('')
 
       if (
         !res.headersSent
@@ -1575,7 +1265,7 @@ app.get(
         return res
           .status(500)
           .send(
-            'Videoni yuklashda xato',
+            'Videoni stream qilishda xato',
           )
       }
 
@@ -1589,69 +1279,12 @@ app.get(
 )
 
 // ======================================================
-// VIDEO HEAD
-// ======================================================
-
-app.head(
-  '/api/video/:id',
-  (
-    req,
-    res,
-  ) => {
-    const media =
-      mediaDB.get(
-        req.params.id,
-      )
-
-    if (
-      !media ||
-      media.type !==
-        'video'
-    ) {
-      return res
-        .status(404)
-        .end()
-    }
-
-    res.setHeader(
-      'Content-Type',
-      media.mimeType ||
-        'video/mp4',
-    )
-
-    res.setHeader(
-      'Content-Length',
-      String(
-        media.fileSize,
-      ),
-    )
-
-    res.setHeader(
-      'Accept-Ranges',
-      'bytes',
-    )
-
-    res.setHeader(
-      'Cache-Control',
-      'public, max-age=3600',
-    )
-
-    return res
-      .status(200)
-      .end()
-  },
-)
-
-// ======================================================
 // IMAGE
 // ======================================================
 
 app.get(
   '/api/image/:id',
-  async (
-    req,
-    res,
-  ) => {
+  async (req, res) => {
     try {
       const media =
         mediaDB.get(
@@ -1667,8 +1300,7 @@ app.get(
       }
 
       if (
-        media.type !==
-        'photo'
+        media.type !== 'photo'
       ) {
         return res
           .status(400)
@@ -1677,50 +1309,31 @@ app.get(
           )
       }
 
-      const telegramMedia =
-        await getTelegramMedia(
+      const message =
+        await getTelegramMessage(
           media,
         )
 
+      const chunks: Buffer[] = []
+
       const iterator =
         client.iterDownload({
-          file:
-            telegramMedia,
+          file: message.media,
 
           requestSize:
             TELEGRAM_REQUEST_SIZE,
         })
 
-      const chunks:
-        Buffer[] = []
-
-      let total = 0
-
       for await (
         const chunk of iterator
       ) {
-        if (
-          req.destroyed
-        ) {
-          return
-        }
-
-        const buffer =
-          Buffer.from(chunk)
-
         chunks.push(
-          buffer,
+          Buffer.from(chunk),
         )
-
-        total +=
-          buffer.length
       }
 
-      const image =
-        Buffer.concat(
-          chunks,
-          total,
-        )
+      const buffer =
+        Buffer.concat(chunks)
 
       res.setHeader(
         'Content-Type',
@@ -1730,22 +1343,15 @@ app.get(
 
       res.setHeader(
         'Content-Length',
-        String(image.length),
+        String(buffer.length),
       )
 
       res.setHeader(
         'Cache-Control',
-        'public, max-age=86400',
+        'public, max-age=3600',
       )
 
-      res.setHeader(
-        'X-Content-Type-Options',
-        'nosniff',
-      )
-
-      return res.end(
-        image,
-      )
+      return res.end(buffer)
     } catch (error) {
       console.error(
         '❌ IMAGE ERROR:',
@@ -1762,442 +1368,7 @@ app.get(
           )
       }
 
-      if (
-        !res.destroyed
-      ) {
-        res.destroy()
-      }
-    }
-  },
-)
-
-// ======================================================
-// DELETE
-// ======================================================
-
-app.delete(
-  '/api/media/:id',
-  async (
-    req,
-    res,
-  ) => {
-    try {
-      const id =
-        req.params.id
-
-      const media =
-        mediaDB.get(id)
-
-      if (!media) {
-        return res
-          .status(404)
-          .json({
-            success: false,
-
-            message:
-              'Media topilmadi',
-          })
-      }
-
-      mediaDB.delete(id)
-
-      // RAM cache'ni ham tozalaymiz.
-      for (
-        const [
-          key,
-          entry,
-        ] of cache
-      ) {
-        if (
-          entry.mediaId ===
-          id
-        ) {
-          deleteCache(key)
-        }
-      }
-
-      telegramMediaCache.delete(
-        id,
-      )
-
-      await saveDatabase()
-
-      return res.json({
-        success: true,
-
-        message:
-          'Media o‘chirildi',
-      })
-    } catch (error) {
-      console.error(
-        '❌ DELETE ERROR:',
-        error,
-      )
-
-      return res
-        .status(500)
-        .json({
-          success: false,
-
-          message:
-            'O‘chirishda xato',
-        })
-    }
-  },
-)
-
-// ======================================================
-// TELEGRAM BOT
-// ======================================================
-
-bot.on(
-  'message',
-  async (
-    ctx,
-  ) => {
-    try {
-      const message =
-        ctx.message
-
-      const chatId =
-        String(
-          ctx.chat.id,
-        )
-
-      const messageId =
-        message.message_id
-
-      // ==================================================
-      // VIDEO
-      // ==================================================
-
-      if (
-        'video' in
-        message
-      ) {
-        const video =
-          message.video
-
-        const existing =
-          findByMessage(
-            chatId,
-            messageId,
-          )
-
-        if (existing) {
-          await ctx.reply(
-            `🎬 Video allaqachon mavjud!\n\n` +
-              `🆔 ${existing.id}\n\n` +
-              `🔗 ${PUBLIC_URL}/api/video/${existing.id}`,
-          )
-
-          return
-        }
-
-        const sameFile =
-          findByFileId(
-            video.file_id,
-          )
-
-        if (sameFile) {
-          await ctx.reply(
-            `🎬 Bu file_id allaqachon mavjud!\n\n` +
-              `🆔 ${sameFile.id}`,
-          )
-
-          return
-        }
-
-        const id =
-          createMediaId()
-
-        const now =
-          new Date().toISOString()
-
-        const media:
-          MediaRecord = {
-          id,
-
-          fileId:
-            video.file_id,
-
-          chatId,
-
-          messageId,
-
-          type: 'video',
-
-          fileSize:
-            video.file_size ??
-            0,
-
-          mimeType:
-            video.mime_type ||
-            'video/mp4',
-
-          fileName:
-            video.file_name,
-
-          width:
-            video.width,
-
-          height:
-            video.height,
-
-          duration:
-            video.duration,
-
-          createdAt:
-            now,
-
-          updatedAt:
-            now,
-        }
-
-        mediaDB.set(
-          id,
-          media,
-        )
-
-        await saveDatabase()
-
-        logMedia(media)
-
-        await ctx.reply(
-          `🎬 VIDEO TAYYOR!\n\n` +
-            `🆔 ${id}\n\n` +
-            `🪪 File ID:\n${video.file_id}\n\n` +
-            `📦 ${media.fileSize} bytes\n\n` +
-            `🔗 ${PUBLIC_URL}/api/video/${id}`,
-        )
-
-        return
-      }
-
-      // ==================================================
-      // DOCUMENT
-      // ==================================================
-
-      if (
-        'document' in
-        message
-      ) {
-        const document =
-          message.document
-
-        const mime =
-          document.mime_type ||
-          ''
-
-        const fileName =
-          document.file_name ||
-          ''
-
-        const isVideo =
-          mime.startsWith(
-            'video/',
-          ) ||
-          /\.(mp4|mkv|webm|mov|avi)$/i.test(
-            fileName,
-          )
-
-        if (!isVideo) {
-          await ctx.reply(
-            '📦 Document video emas.',
-          )
-
-          return
-        }
-
-        const existing =
-          findByMessage(
-            chatId,
-            messageId,
-          )
-
-        if (existing) {
-          await ctx.reply(
-            `🎬 Video mavjud!\n\n` +
-              `🆔 ${existing.id}`,
-          )
-
-          return
-        }
-
-        const sameFile =
-          findByFileId(
-            document.file_id,
-          )
-
-        if (sameFile) {
-          await ctx.reply(
-            `🎬 Bu file_id allaqachon mavjud!\n\n` +
-              `🆔 ${sameFile.id}`,
-          )
-
-          return
-        }
-
-        const id =
-          createMediaId()
-
-        const now =
-          new Date().toISOString()
-
-        const media:
-          MediaRecord = {
-          id,
-
-          fileId:
-            document.file_id,
-
-          chatId,
-
-          messageId,
-
-          type: 'video',
-
-          fileSize:
-            document.file_size ??
-            0,
-
-          mimeType:
-            mime ||
-            'video/mp4',
-
-          fileName,
-
-          createdAt:
-            now,
-
-          updatedAt:
-            now,
-        }
-
-        mediaDB.set(
-          id,
-          media,
-        )
-
-        await saveDatabase()
-
-        logMedia(media)
-
-        await ctx.reply(
-          `🎬 VIDEO FILE TAYYOR!\n\n` +
-            `🆔 ${id}\n\n` +
-            `🪪 File ID:\n${document.file_id}\n\n` +
-            `📁 ${fileName}\n\n` +
-            `🔗 ${PUBLIC_URL}/api/video/${id}`,
-        )
-
-        return
-      }
-
-      // ==================================================
-      // PHOTO
-      // ==================================================
-
-      if (
-        'photo' in
-        message
-      ) {
-        const photos =
-          message.photo
-
-        const photo =
-          photos[
-            photos.length - 1
-          ]
-
-        const existing =
-          findByMessage(
-            chatId,
-            messageId,
-          )
-
-        if (existing) {
-          await ctx.reply(
-            `🖼 Rasm mavjud!\n\n` +
-              `🆔 ${existing.id}`,
-          )
-
-          return
-        }
-
-        const sameFile =
-          findByFileId(
-            photo.file_id,
-          )
-
-        if (sameFile) {
-          await ctx.reply(
-            `🖼 Bu file_id allaqachon mavjud!\n\n` +
-              `🆔 ${sameFile.id}`,
-          )
-
-          return
-        }
-
-        const id =
-          createMediaId()
-
-        const now =
-          new Date().toISOString()
-
-        const media:
-          MediaRecord = {
-          id,
-
-          fileId:
-            photo.file_id,
-
-          chatId,
-
-          messageId,
-
-          type: 'photo',
-
-          fileSize:
-            photo.file_size ??
-            0,
-
-          width:
-            photo.width,
-
-          height:
-            photo.height,
-
-          createdAt:
-            now,
-
-          updatedAt:
-            now,
-        }
-
-        mediaDB.set(
-          id,
-          media,
-        )
-
-        await saveDatabase()
-
-        logMedia(media)
-
-        await ctx.reply(
-          `🖼 RASM TAYYOR!\n\n` +
-            `🆔 ${id}\n\n` +
-            `🪪 File ID:\n${photo.file_id}\n\n` +
-            `🔗 ${PUBLIC_URL}/api/image/${id}`,
-        )
-
-        return
-      }
-    } catch (error) {
-      console.error(
-        '❌ BOT ERROR:',
-        error,
-      )
+      res.destroy()
     }
   },
 )
@@ -2208,22 +1379,10 @@ bot.on(
 
 async function start() {
   try {
-    // ------------------------------------------
-    // DATA
-    // ------------------------------------------
-
-    await prepareData()
-
-    await loadDatabase()
-
-    // ------------------------------------------
-    // TELEGRAM
-    // ------------------------------------------
-
     console.log('')
 
     console.log(
-      '==========================================',
+      '======================================',
     )
 
     console.log(
@@ -2231,43 +1390,25 @@ async function start() {
     )
 
     console.log(
-      '==========================================',
+      '======================================',
     )
 
     await client.start({
-      botAuthToken:
-        TOKEN,
+      botAuthToken: TOKEN,
     })
 
     console.log(
-      '✅ MTProto ulandi',
+      '✅ MTProto ulandi!',
     )
 
     console.log(
-      'Connected:',
+      'Telegram connected:',
       client.connected,
     )
 
-    // ------------------------------------------
-    // SAVE SESSION
-    // ------------------------------------------
-
-    const newSession =
-      client.session.save()
-
-    await fs.writeFile(
-      SESSION_FILE,
-      newSession,
-      'utf8',
-    )
-
-    console.log(
-      '💾 Session saqlandi',
-    )
-
-    // ------------------------------------------
+    // ==================================================
     // EXPRESS
-    // ------------------------------------------
+    // ==================================================
 
     app.listen(
       PORT,
@@ -2276,72 +1417,60 @@ async function start() {
         console.log('')
 
         console.log(
-          '==========================================',
+          '======================================',
         )
 
         console.log(
-          '🚀 SERVER ISHLADI',
+          `🚀 API: ${PUBLIC_URL}`,
         )
 
         console.log(
-          `📡 PORT: ${PORT}`,
+          `🚀 PORT: ${PORT}`,
         )
 
         console.log(
-          `🌍 PUBLIC: ${PUBLIC_URL}`,
+          `⚡ Chunk: ${CHUNK_SIZE / 1024 / 1024} MB`,
         )
 
         console.log(
-          `💾 MEDIA: ${MEDIA_FILE}`,
+          `💾 Cache: ${MAX_CACHE_BYTES / 1024 / 1024} MB`,
         )
 
         console.log(
-          `🧠 RAM CACHE: ${MAX_CACHE_SIZE / 1024 / 1024} MB`,
+          `🔄 Telegram parallel: ${MAX_TELEGRAM_DOWNLOADS}`,
         )
 
         console.log(
-          `📦 CHUNK: ${CHUNK_SIZE / 1024 / 1024} MB`,
-        )
-
-        console.log(
-          `⚡ PREFETCH: ${PREFETCH_CHUNKS}`,
-        )
-
-        console.log(
-          `🚀 PARALLEL: ${MAX_PARALLEL_DOWNLOADS}`,
-        )
-
-        console.log(
-          '==========================================',
+          '======================================',
         )
 
         console.log('')
       },
     )
 
-    // ------------------------------------------
+    // ==================================================
     // BOT
-    // ------------------------------------------
+    // ==================================================
 
     bot.start()
 
     console.log(
-      '🤖 BOT ISHLADI',
+      '🤖 BOT ISHLADI!',
     )
 
     console.log(
-      '🎬 Video/image yuborishingiz mumkin',
+      '🎬 Video yuborishingiz mumkin.',
     )
   } catch (error) {
     console.error('')
 
     console.error(
-      '❌ START ERROR',
+      '❌ SERVER ERROR',
     )
 
-    console.error(
-      error,
-    )
+    console.error(error)
+
+    console.error('')
 
     process.exit(1)
   }
@@ -2351,4 +1480,4 @@ async function start() {
 // RUN
 // ======================================================
 
-void start()
+start()
