@@ -1,846 +1,657 @@
 import 'dotenv/config'
 
 import bigInt from 'big-integer'
+import compression from 'compression'
 import cors from 'cors'
-import express from 'express'
+import express, { Request, Response } from 'express'
 import { Bot } from 'grammy'
+import pino from 'pino'
 import { sessions, TelegramClient } from 'telegram'
 
-// ======================================================
+// ============================================================
+// LOGGER SETUP
+// ============================================================
+
+const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  transport: {
+    target: 'pino-pretty',
+    options: {
+      colorize: true,
+      singleLine: false,
+      translateTime: 'SYS:standard',
+    },
+  },
+})
+
+// ============================================================
 // CONFIG
-// ======================================================
+// ============================================================
 
-const TOKEN = process.env.TOKEN ?? ''
-
-const API_ID = Number(process.env.API_ID)
-const API_HASH = process.env.API_HASH
-
-const PORT = Number(process.env.PORT) || 3050
-
-const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/+$/, '')
-
-if (!TOKEN) {
-  throw new Error('❌ TOKEN topilmadi!')
+interface Config {
+  token: string
+  apiId: number
+  apiHash: string
+  port: number
+  publicUrl: string
 }
 
-const BOT_TOKEN = TOKEN as string
+function loadConfig(): Config {
+  const token = process.env.TOKEN ?? ''
+  const apiId = Number(process.env.API_ID)
+  const apiHash = process.env.API_HASH
+  const port = Number(process.env.PORT) || 3050
+  const publicUrl = (process.env.PUBLIC_URL || `http://localhost:${port}`).replace(
+    /\/+$/,
+    ''
+  )
 
-if (!API_ID) {
-  throw new Error('❌ API_ID topilmadi!')
+  if (!token) throw new Error('❌ TOKEN not found')
+  if (!apiId) throw new Error('❌ API_ID not found')
+  if (!apiHash) throw new Error('❌ API_HASH not found')
+
+  return { token, apiId, apiHash, port, publicUrl }
 }
 
-if (!API_HASH) {
-  throw new Error('❌ API_HASH topilmadi!')
-}
+const config = loadConfig()
 
-// ======================================================
+// ============================================================
 // PERFORMANCE CONFIG
-// ======================================================
+// ============================================================
 
-// Bitta chunk
-const CHUNK_SIZE = 16 * 1024 * 1024 // 16 MB
+const PERFORMANCE = {
+  // Katta chunk size = kam request
+  CHUNK_SIZE: 64 * 1024 * 1024, // 64 MB
 
-// RAM cache maksimal hajmi
-const MAX_CACHE_BYTES = 512 * 1024 * 1024 // 512 MB
+  // RAM cache maksimal
+  MAX_CACHE_BYTES: 2 * 1024 * 1024 * 1024, // 2 GB
 
-// Bir vaqtning o'zida Telegram'dan nechta download
-const MAX_TELEGRAM_DOWNLOADS = 2
+  // Parallel Telegram downloads
+  MAX_TELEGRAM_DOWNLOADS: 8,
 
-// Telegram request chunk size
-const TELEGRAM_REQUEST_SIZE = 1024 * 1024 // 1 MB
+  // Har bitta Telegram request'da nechta data
+  TELEGRAM_REQUEST_SIZE: 16 * 1024 * 1024, // 16 MB
 
-// Cache qancha vaqt saqlansin
-const CACHE_TTL = 10 * 60 * 1000 // 10 min
+  // Cache qancha vaqt saqlansin
+  CACHE_TTL: 30 * 60 * 1000, // 30 min
 
-// ======================================================
-// EXPRESS
-// ======================================================
+  // Prefetch strategy
+  PREFETCH_CHUNKS: 3,
+
+  // Request timeout
+  REQUEST_TIMEOUT: 60 * 1000, // 60 sec
+
+  // Max video size
+  MAX_VIDEO_SIZE: 5 * 1024 * 1024 * 1024, // 5 GB
+
+  // Rate limit
+  RATE_LIMIT_WINDOW: 60 * 1000, // 1 min
+  RATE_LIMIT_MAX_REQUESTS: 1000,
+} as const
+
+// ============================================================
+// TYPES
+// ============================================================
+
+type MediaType = 'video' | 'photo'
+
+interface MediaRecord {
+  id: string
+  fileId: string
+  chatId: string
+  messageId: number
+  type: MediaType
+  fileSize: number
+  mimeType?: string
+  fileName?: string
+  width?: number
+  height?: number
+  duration?: number
+  createdAt: number
+  accessCount: number
+}
+
+interface CacheEntry {
+  key: string
+  buffer: Buffer
+  createdAt: number
+  lastAccess: number
+  size: number
+}
+
+interface DownloadTask {
+  mediaId: string
+  chunkStart: number
+  chunkEnd: number
+  priority: number
+  retries: number
+}
+
+// ============================================================
+// STATE MANAGEMENT
+// ============================================================
+
+class StateManager {
+  private mediaDB = new Map<string, MediaRecord>()
+  private cache = new Map<string, CacheEntry>()
+  private cacheBytes = 0
+  private activeDownloads = new Map<string, Promise<Buffer>>()
+  private downloadQueue: DownloadTask[] = []
+  private activeTelegramDownloads = 0
+  private requestMetrics = new Map<string, number>()
+
+  // Lock uchun
+  private queueLock = false
+
+  // Getters
+  getMedia(id: string): MediaRecord | undefined {
+    const media = this.mediaDB.get(id)
+    if (media) {
+      media.accessCount++
+      media.accessCount // Update stats
+    }
+    return media
+  }
+
+  getAllMedia(): MediaRecord[] {
+    return Array.from(this.mediaDB.values())
+  }
+
+  getCacheSizeMB(): number {
+    return this.cacheBytes / 1024 / 1024
+  }
+
+  getStats() {
+    return {
+      mediaCount: this.mediaDB.size,
+      cacheEntries: this.cache.size,
+      cacheBytes: this.cacheBytes,
+      cacheMB: Number(this.getCacheSizeMB().toFixed(2)),
+      activeTelegramDownloads: this.activeTelegramDownloads,
+      queuedDownloads: this.downloadQueue.length,
+      activeChunkDownloads: this.activeDownloads.size,
+    }
+  }
+
+  // Media operations
+  addMedia(media: MediaRecord): void {
+    this.mediaDB.set(media.id, media)
+  }
+
+  // Cache operations
+  getCache(key: string): Buffer | null {
+    this.cleanExpiredCache()
+
+    const entry = this.cache.get(key)
+    if (!entry) return null
+
+    entry.lastAccess = Date.now()
+
+    // LRU: Move to end
+    this.cache.delete(key)
+    this.cache.set(key, entry)
+
+    return entry.buffer
+  }
+
+  setCache(key: string, buffer: Buffer): void {
+    this.cleanExpiredCache()
+
+    if (buffer.length > PERFORMANCE.MAX_CACHE_BYTES) {
+      logger.warn(`Buffer too large to cache: ${buffer.length} bytes`)
+      return
+    }
+
+    // Remove existing
+    this.removeCache(key)
+
+    const entry: CacheEntry = {
+      key,
+      buffer,
+      createdAt: Date.now(),
+      lastAccess: Date.now(),
+      size: buffer.length,
+    }
+
+    this.cache.set(key, entry)
+    this.cacheBytes += buffer.length
+
+    // Remove oldest entries if exceeded
+    while (this.cacheBytes > PERFORMANCE.MAX_CACHE_BYTES) {
+      const oldestKey = this.cache.keys().next().value
+      if (!oldestKey) break
+      this.removeCache(oldestKey)
+    }
+  }
+
+  private removeCache(key: string): void {
+    const entry = this.cache.get(key)
+    if (!entry) return
+
+    this.cacheBytes -= entry.size
+    this.cache.delete(key)
+  }
+
+  private cleanExpiredCache(): void {
+    const now = Date.now()
+    const keysToDelete: string[] = []
+
+    for (const [key, entry] of this.cache) {
+      if (now - entry.createdAt > PERFORMANCE.CACHE_TTL) {
+        keysToDelete.push(key)
+      }
+    }
+
+    keysToDelete.forEach((key) => this.removeCache(key))
+  }
+
+  // Download tracking
+  hasActiveDownload(key: string): boolean {
+    return this.activeDownloads.has(key)
+  }
+
+  getActiveDownload(key: string): Promise<Buffer> | undefined {
+    return this.activeDownloads.get(key)
+  }
+
+  setActiveDownload(key: string, promise: Promise<Buffer>): void {
+    this.activeDownloads.set(key, promise)
+  }
+
+  deleteActiveDownload(key: string): void {
+    this.activeDownloads.delete(key)
+  }
+
+  // Queue management with lock
+  async queueDownload(task: DownloadTask): Promise<void> {
+    this.downloadQueue.push(task)
+    this.downloadQueue.sort((a, b) => b.priority - a.priority)
+    await this.processQueue()
+  }
+
+  private async processQueue(): Promise<void> {
+    if (this.queueLock) return
+
+    this.queueLock = true
+
+    try {
+      while (
+        this.activeTelegramDownloads < PERFORMANCE.MAX_TELEGRAM_DOWNLOADS &&
+        this.downloadQueue.length > 0
+      ) {
+        this.activeTelegramDownloads++
+        const task = this.downloadQueue.shift()
+
+        if (!task) {
+          this.activeTelegramDownloads--
+          break
+        }
+
+        // Task will be processed externally
+        // Just mark as active
+      }
+    } finally {
+      this.queueLock = false
+    }
+  }
+
+  incrementActiveTelegramDownloads(): void {
+    this.activeTelegramDownloads++
+  }
+
+  decrementActiveTelegramDownloads(): void {
+    this.activeTelegramDownloads--
+  }
+
+  // Metrics
+  recordRequest(endpoint: string): void {
+    const key = `${endpoint}:${Date.now() / PERFORMANCE.RATE_LIMIT_WINDOW}`
+    this.requestMetrics.set(
+      key,
+      (this.requestMetrics.get(key) ?? 0) + 1
+    )
+  }
+
+  isRateLimited(endpoint: string): boolean {
+    const key = `${endpoint}:${Date.now() / PERFORMANCE.RATE_LIMIT_WINDOW}`
+    const count = this.requestMetrics.get(key) ?? 0
+    return count > PERFORMANCE.RATE_LIMIT_MAX_REQUESTS
+  }
+}
+
+const state = new StateManager()
+
+// ============================================================
+// TELEGRAM CLIENT
+// ============================================================
+
+class TelegramManager {
+  private client: TelegramClient
+  private bot: Bot
+  private connected = false
+
+  constructor(token: string, apiId: number, apiHash: string) {
+    const session = new sessions.StringSession('')
+
+    this.client = new TelegramClient(session, apiId, apiHash, {
+      connectionRetries: 5,
+      requestRetries: 3,
+      connectionTimeout: 60,
+      autoReconnect: true,
+    })
+
+    this.bot = new Bot(token)
+  }
+
+  async connect(): Promise<void> {
+    try {
+      await this.client.connect()
+      await this.client.start({
+        botAuthToken: config.token,
+      })
+
+      this.connected = true
+      logger.info('✅ Telegram MTProto connected')
+    } catch (error) {
+      logger.error({ error }, '❌ Telegram connection failed')
+      throw error
+    }
+  }
+
+  isConnected(): boolean {
+    return this.connected
+  }
+
+  getClient(): TelegramClient {
+    return this.client
+  }
+
+  getBot(): Bot {
+    return this.bot
+  }
+
+  async getMessage(chatId: string, messageId: number) {
+    try {
+      const messages = await this.client.getMessages(chatId, {
+        ids: [messageId],
+      })
+
+      const message = messages[0]
+      if (!message) throw new Error('Message not found')
+      if (!message.media) throw new Error('Media not found in message')
+
+      return message
+    } catch (error) {
+      logger.error({ error, chatId, messageId }, 'Failed to get message')
+      throw error
+    }
+  }
+
+  async downloadChunk(
+    message: any,
+    fileSize: number,
+    start: number,
+    end: number
+  ): Promise<Buffer> {
+    try {
+      const length = end - start + 1
+      const chunks: Buffer[] = []
+      let downloaded = 0
+
+      const mediaFile = message.media
+      if (!mediaFile) throw new Error('Media not found')
+
+      const iterator = this.client.iterDownload({
+        file: mediaFile,
+        offset: bigInt(start),
+        limit: length,
+        fileSize: bigInt(fileSize),
+        requestSize: PERFORMANCE.TELEGRAM_REQUEST_SIZE,
+      })
+
+      for await (const chunk of iterator) {
+        const buffer = Buffer.from(chunk)
+        const remaining = length - downloaded
+
+        if (remaining <= 0) break
+
+        const data =
+          buffer.length > remaining ? buffer.subarray(0, remaining) : buffer
+
+        chunks.push(data)
+        downloaded += data.length
+
+        if (downloaded >= length) break
+      }
+
+      return Buffer.concat(chunks)
+    } catch (error) {
+      logger.error({ error, start, end }, 'Download chunk failed')
+      throw error
+    }
+  }
+}
+
+// ============================================================
+// CACHE MANAGER
+// ============================================================
+
+class CacheManager {
+  private cleanupInterval: NodeJS.Timeout | null = null
+
+  start(): void {
+    // Background cleanup har 5 minutda
+    this.cleanupInterval = setInterval(() => {
+      const beforeSize = state.getCacheSizeMB()
+      // Cleanup done in setCache
+      const afterSize = state.getCacheSizeMB()
+
+      if (beforeSize !== afterSize) {
+        logger.debug(
+          { before: beforeSize, after: afterSize },
+          'Cache cleaned up'
+        )
+      }
+    }, 5 * 60 * 1000)
+  }
+
+  stop(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval)
+      this.cleanupInterval = null
+    }
+  }
+}
+
+// ============================================================
+// UTILS
+// ============================================================
+
+function createMediaId(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 10)
+}
+
+function createChunkKey(mediaId: string, start: number): string {
+  return `${mediaId}:${start}`
+}
+
+function logMedia(media: MediaRecord): void {
+  logger.info(
+    {
+      id: media.id,
+      type: media.type,
+      fileId: media.fileId,
+      chatId: media.chatId,
+      messageId: media.messageId,
+      fileSize: media.fileSize,
+      mimeType: media.mimeType,
+      fileName: media.fileName,
+      url: `${config.publicUrl}/api/${media.type}/${media.id}`,
+    },
+    `📦 ${media.type === 'video' ? '🎬 VIDEO' : '🖼 PHOTO'} saved`
+  )
+}
+
+// ============================================================
+// EXPRESS APP
+// ============================================================
 
 const app = express()
 
+// Middleware
+app.use(compression())
 app.use(
   cors({
     origin: '*',
     methods: ['GET', 'HEAD', 'OPTIONS'],
+    credentials: false,
   })
 )
+app.use(express.json({ limit: '10kb' }))
 
-app.use(express.json())
-
-// ======================================================
-// GRAMMY
-// ======================================================
-
-const bot = new Bot(BOT_TOKEN)
-
-// ======================================================
-// TELEGRAM MTProto
-// ======================================================
-
-const session = new sessions.StringSession('')
-
-const client = new TelegramClient(session, API_ID, API_HASH, {
-  connectionRetries: 5,
+// Keep-alive
+app.use((req, res, next) => {
+  res.setHeader('Connection', 'keep-alive')
+  res.setHeader('Keep-Alive', 'timeout=65, max=100')
+  next()
 })
 
-// ======================================================
-// TYPES
-// ======================================================
-
-type MediaType = 'video' | 'photo'
-
-type MediaRecord = {
-  id: string
-
-  fileId: string
-
-  chatId: string
-
-  messageId: number
-
-  type: MediaType
-
-  fileSize: number
-
-  mimeType?: string | undefined
-
-  fileName?: string | undefined
-
-  width?: number | undefined
-
-  height?: number | undefined
-
-  duration?: number | undefined
-}
-
-// ======================================================
-// MEDIA DATABASE
-// ======================================================
-
-const mediaDB = new Map<string, MediaRecord>()
-
-// ======================================================
-// CACHE TYPES
-// ======================================================
-
-type CacheEntry = {
-  key: string
-
-  buffer: Buffer
-
-  createdAt: number
-
-  lastAccess: number
-
-  size: number
-}
-
-const cache = new Map<string, CacheEntry>()
-
-let cacheBytes = 0
-
-// ======================================================
-// ACTIVE DOWNLOADS
-// ======================================================
-
-// Bir xil chunkni 10 user so'rasa,
-// Telegram'ga 10 ta request yubormaymiz.
-//
-// Bitta Promise ishlaydi va hamma shu Promise'ni kutadi.
-
-const activeDownloads = new Map<string, Promise<Buffer>>()
-
-// ======================================================
-// DOWNLOAD QUEUE
-// ======================================================
-
-let activeTelegramDownloads = 0
-
-const downloadQueue: Array<{
-  task: () => Promise<void>
-}> = []
-
-// ======================================================
-// ID
-// ======================================================
-
-function createMediaId() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 10)
-}
-
-// ======================================================
-// CACHE SIZE
-// ======================================================
-
-function getCacheSizeMB() {
-  return cacheBytes / 1024 / 1024
-}
-
-// ======================================================
-// REMOVE CACHE
-// ======================================================
-
-function removeCache(key: string) {
-  const entry = cache.get(key)
-
-  if (!entry) {
-    return
-  }
-
-  cacheBytes -= entry.size
-
-  cache.delete(key)
-}
-
-// ======================================================
-// CLEAN CACHE
-// ======================================================
-
-function cleanExpiredCache() {
-  const now = Date.now()
-
-  for (const [key, entry] of cache) {
-    if (now - entry.createdAt > CACHE_TTL) {
-      removeCache(key)
-    }
-  }
-}
-
-// ======================================================
-// LRU CACHE
-// ======================================================
-
-function setCache(key: string, buffer: Buffer) {
-  cleanExpiredCache()
-
-  if (buffer.length > MAX_CACHE_BYTES) {
-    return
-  }
-
-  // Agar mavjud bo'lsa
-  removeCache(key)
-
-  const entry: CacheEntry = {
-    key,
-
-    buffer,
-
-    createdAt: Date.now(),
-
-    lastAccess: Date.now(),
-
-    size: buffer.length,
-  }
-
-  cache.set(key, entry)
-
-  cacheBytes += buffer.length
-
-  // Eng eski entry'larni o'chiramiz
-  while (cacheBytes > MAX_CACHE_BYTES) {
-    const first = cache.keys().next().value
-
-    if (!first) {
-      break
-    }
-
-    removeCache(first)
-  }
-}
-
-// ======================================================
-// GET CACHE
-// ======================================================
-
-function getCache(key: string) {
-  cleanExpiredCache()
-
-  const entry = cache.get(key)
-
-  if (!entry) {
-    return null
-  }
-
-  entry.lastAccess = Date.now()
-
-  // LRU uchun oxiriga o'tkazamiz
-  cache.delete(key)
-
-  cache.set(key, entry)
-
-  return entry.buffer
-}
-
-// ======================================================
-// CACHE KEY
-// ======================================================
-
-function createChunkKey(mediaId: string, start: number) {
-  return `${mediaId}:${start}`
-}
-
-// ======================================================
-// DOWNLOAD QUEUE RUNNER
-// ======================================================
-
-function processDownloadQueue() {
-  while (activeTelegramDownloads < MAX_TELEGRAM_DOWNLOADS && downloadQueue.length > 0) {
-    const item = downloadQueue.shift()
-
-    if (!item) {
-      break
-    }
-
-    activeTelegramDownloads++
-
-    item
-      .task()
-      .catch(() => {})
-      .finally(() => {
-        activeTelegramDownloads--
-
-        processDownloadQueue()
-      })
-  }
-}
-
-// ======================================================
-// QUEUE TELEGRAM DOWNLOAD
-// ======================================================
-
-function queueTelegramDownload(task: () => Promise<Buffer>): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    downloadQueue.push({
-      task: async () => {
-        try {
-          const result = await task()
-
-          resolve(result)
-        } catch (error) {
-          reject(error)
-        }
-      },
+// Error handling middleware
+app.use((err: any, req: Request, res: Response, next: any) => {
+  logger.error({ error: err, path: req.path }, 'Unhandled error')
+
+  if (!res.headersSent) {
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined,
     })
-
-    processDownloadQueue()
-  })
-}
-
-// ======================================================
-// LOG MEDIA
-// ======================================================
-
-function logMedia(media: MediaRecord) {
-  console.log('')
-
-  console.log('======================================')
-
-  console.log(media.type === 'video' ? '🎬 VIDEO SAQLANDI' : '🖼 PHOTO SAQLANDI')
-
-  console.log('======================================')
-
-  console.log('ID:', media.id)
-
-  console.log('File ID:', media.fileId)
-
-  console.log('Chat ID:', media.chatId)
-
-  console.log('Message ID:', media.messageId)
-
-  console.log('Size:', media.fileSize)
-
-  console.log('Mime:', media.mimeType)
-
-  console.log('File:', media.fileName)
-
-  console.log('URL:', `${PUBLIC_URL}/api/${media.type}/${media.id}`)
-
-  console.log('======================================')
-
-  console.log('')
-}
-
-// ======================================================
-// GET TELEGRAM MESSAGE
-// ======================================================
-
-async function getTelegramMessage(media: MediaRecord) {
-  const messages = await client.getMessages(media.chatId, {
-    ids: [media.messageId],
-  })
-
-  const message = messages[0]
-
-  if (!message) {
-    throw new Error('Telegram message topilmadi')
   }
+})
 
-  if (!message.media) {
-    throw new Error('Telegram media topilmadi')
-  }
+// ============================================================
+// ROUTES - INFO
+// ============================================================
 
-  return message
-}
+app.get('/', (req: Request, res: Response) => {
+  const stats = state.getStats()
 
-// ======================================================
-// DOWNLOAD ONE CHUNK
-// ======================================================
-
-async function downloadChunk(media: MediaRecord, start: number, end: number): Promise<Buffer> {
-  const key = createChunkKey(media.id, start)
-
-  // ====================================================
-  // CACHE
-  // ====================================================
-
-  const cached = getCache(key)
-
-  if (cached) {
-    console.log(`⚡ CACHE HIT ${start}-${end}`)
-
-    return cached
-  }
-
-  // ====================================================
-  // ACTIVE DOWNLOAD
-  // ====================================================
-
-  const existing = activeDownloads.get(key)
-
-  if (existing) {
-    console.log(`⏳ WAIT EXISTING ${start}-${end}`)
-
-    return existing
-  }
-
-  // ====================================================
-  // DOWNLOAD
-  // ====================================================
-
-  const promise = queueTelegramDownload(async () => {
-    console.log('')
-
-    console.log(`⬇️ TELEGRAM CHUNK ${start}-${end}`)
-
-    const message = await getTelegramMessage(media)
-
-    const length = end - start + 1
-
-    const chunks: Buffer[] = []
-
-    let downloaded = 0
-
-    const mediaFile = message.media
-
-    if (!mediaFile) {
-      throw new Error('Telegram media topilmadi')
-    }
-
-    const iterator = client.iterDownload({
-      file: mediaFile,
-
-      offset: bigInt(start),
-
-      limit: length,
-
-      fileSize: bigInt(media.fileSize),
-
-      requestSize: TELEGRAM_REQUEST_SIZE,
-    })
-
-    for await (const chunk of iterator) {
-      const buffer = Buffer.from(chunk)
-
-      const remaining = length - downloaded
-
-      if (remaining <= 0) {
-        break
-      }
-
-      const data = buffer.length > remaining ? buffer.subarray(0, remaining) : buffer
-
-      chunks.push(data)
-
-      downloaded += data.length
-
-      if (downloaded >= length) {
-        break
-      }
-    }
-
-    const result = Buffer.concat(chunks)
-
-    console.log(`✅ CHUNK ${start}-${end} → ${result.length} bytes`)
-
-    // Cache
-    setCache(key, result)
-
-    return result
-  })
-
-  activeDownloads.set(key, promise)
-
-  try {
-    return await promise
-  } finally {
-    activeDownloads.delete(key)
-  }
-}
-
-// ======================================================
-// PREFETCH NEXT CHUNK
-// ======================================================
-
-function prefetchNextChunk(media: MediaRecord, currentStart: number) {
-  const nextStart = currentStart + CHUNK_SIZE
-
-  if (nextStart >= media.fileSize) {
-    return
-  }
-
-  const nextEnd = Math.min(nextStart + CHUNK_SIZE - 1, media.fileSize - 1)
-
-  const key = createChunkKey(media.id, nextStart)
-
-  if (getCache(key) || activeDownloads.has(key)) {
-    return
-  }
-
-  // Background download
-  downloadChunk(media, nextStart, nextEnd).catch((error) => {
-    console.error('⚠️ PREFETCH ERROR:', error?.message || error)
-  })
-}
-
-// ======================================================
-// HOME
-// ======================================================
-
-app.get('/', (_req, res) => {
   res.json({
     success: true,
-
-    message: 'Telegram Media API ishlayapti 🚀',
-
-    telegram: client.connected,
-
-    mediaCount: mediaDB.size,
-
-    cache: {
-      entries: cache.size,
-
-      bytes: cacheBytes,
-
-      mb: Number(getCacheSizeMB().toFixed(2)),
-
-      maxMb: MAX_CACHE_BYTES / 1024 / 1024,
+    message: '🚀 Telegram Media Streaming API',
+    status: 'running',
+    telegram: telegramManager.isConnected(),
+    stats,
+    performance: PERFORMANCE,
+    config: {
+      publicUrl: config.publicUrl,
+      port: config.port,
     },
-
-    activeDownloads: activeTelegramDownloads,
-
-    queuedDownloads: downloadQueue.length,
   })
 })
 
-// ======================================================
-// HEALTH
-// ======================================================
+app.get('/health', (req: Request, res: Response) => {
+  const stats = state.getStats()
 
-app.get('/health', (_req, res) => {
   res.json({
     success: true,
-
-    telegram: client.connected,
-
-    mediaCount: mediaDB.size,
-
-    cache: {
-      entries: cache.size,
-
-      bytes: cacheBytes,
-
-      mb: Number(getCacheSizeMB().toFixed(2)),
-
-      maxMb: MAX_CACHE_BYTES / 1024 / 1024,
-    },
-
-    activeDownloads: activeTelegramDownloads,
-
-    queuedDownloads: downloadQueue.length,
-
-    activeChunkDownloads: activeDownloads.size,
-
+    status: 'healthy',
     uptime: process.uptime(),
+    telegram: telegramManager.isConnected(),
+    stats,
+    timestamp: new Date().toISOString(),
   })
 })
 
-// ======================================================
-// MEDIA LIST
-// ======================================================
+// ============================================================
+// ROUTES - MEDIA LIST
+// ============================================================
 
-app.get('/api/media', (_req, res) => {
-  return res.json({
+app.get('/api/media', (req: Request, res: Response) => {
+  const media = state.getAllMedia()
+
+  res.json({
     success: true,
-
-    count: mediaDB.size,
-
-    media: [...mediaDB.values()].map((media) => ({
-      id: media.id,
-
-      type: media.type,
-
-      fileId: media.fileId,
-
-      chatId: media.chatId,
-
-      messageId: media.messageId,
-
-      fileSize: media.fileSize,
-
-      mimeType: media.mimeType,
-
-      fileName: media.fileName,
+    count: media.length,
+    media: media.map((m) => ({
+      id: m.id,
+      type: m.type,
+      fileId: m.fileId,
+      chatId: m.chatId,
+      messageId: m.messageId,
+      fileSize: m.fileSize,
+      mimeType: m.mimeType,
+      fileName: m.fileName,
+      accessCount: m.accessCount,
+      createdAt: m.createdAt,
     })),
   })
 })
 
-// ======================================================
-// TELEGRAM MESSAGE RECEIVER
-// ======================================================
-
-bot.on('message', async (ctx) => {
-  try {
-    const message = ctx.message
-
-    console.log('')
-
-    console.log('======================================')
-
-    console.log('📩 TELEGRAM MESSAGE')
-
-    console.log('Chat ID:', ctx.chat.id)
-
-    console.log('Message ID:', message.message_id)
-
-    // ==================================================
-    // VIDEO
-    // ==================================================
-
-    if ('video' in message) {
-      const video = message.video
-
-      const id = createMediaId()
-
-      const media: MediaRecord = {
-        id,
-
-        fileId: video.file_id,
-
-        chatId: String(ctx.chat.id),
-
-        messageId: message.message_id,
-
-        type: 'video',
-
-        fileSize: video.file_size ?? 0,
-
-        mimeType: video.mime_type || 'video/mp4',
-
-        fileName: video.file_name ?? '',
-
-        width: video.width,
-
-        height: video.height,
-
-        duration: video.duration,
-      }
-
-      mediaDB.set(id, media)
-
-      logMedia(media)
-
-      await ctx.reply(
-        `🎬 VIDEO TAYYOR!\n\n` +
-          `🆔 Media ID:\n${id}\n\n` +
-          `📦 Hajmi:\n${media.fileSize} bytes\n\n` +
-          `🎞 MIME:\n${media.mimeType}\n\n` +
-          `🔗 Video URL:\n${PUBLIC_URL}/api/video/${id}`
-      )
-
-      return
-    }
-
-    // ==================================================
-    // DOCUMENT VIDEO
-    // ==================================================
-
-    if ('document' in message) {
-      const document = message.document
-
-      const mime = document.mime_type || ''
-
-      const fileName = document.file_name || ''
-
-      const isVideo = mime.startsWith('video/') || /\.(mp4|mkv|webm|mov|avi)$/i.test(fileName)
-
-      if (!isVideo) {
-        await ctx.reply('📦 Document keldi, lekin video emas.')
-
-        return
-      }
-
-      const id = createMediaId()
-
-      const media: MediaRecord = {
-        id,
-
-        fileId: document.file_id,
-
-        chatId: String(ctx.chat.id),
-
-        messageId: message.message_id,
-
-        type: 'video',
-
-        fileSize: document.file_size ?? 0,
-
-        mimeType: mime || 'video/mp4',
-
-        fileName,
-      }
-
-      mediaDB.set(id, media)
-
-      logMedia(media)
-
-      await ctx.reply(
-        `🎬 VIDEO FILE TAYYOR!\n\n` +
-          `🆔 Media ID:\n${id}\n\n` +
-          `📦 Hajmi:\n${media.fileSize} bytes\n\n` +
-          `🎞 MIME:\n${media.mimeType}\n\n` +
-          `📁 File:\n${media.fileName}\n\n` +
-          `🔗 Video URL:\n${PUBLIC_URL}/api/video/${id}`
-      )
-
-      return
-    }
-
-    // ==================================================
-    // PHOTO
-    // ==================================================
-
-    if ('photo' in message) {
-      const photos = message.photo
-
-      if (!photos || photos.length === 0) {
-        throw new Error('Telegram photo topilmadi')
-      }
-
-      const photo = photos[photos.length - 1]
-
-      if (!photo) {
-        throw new Error('Telegram photo topilmadi')
-      }
-
-      const id = createMediaId()
-
-      const media: MediaRecord = {
-        id,
-
-        fileId: photo.file_id,
-
-        chatId: String(ctx.chat.id),
-
-        messageId: message.message_id,
-
-        type: 'photo',
-
-        fileSize: photo.file_size ?? 0,
-
-        width: photo.width,
-
-        height: photo.height,
-      }
-
-      mediaDB.set(id, media)
-
-      logMedia(media)
-
-      await ctx.reply(
-        `🖼 RASM TAYYOR!\n\n` +
-          `🆔 Media ID:\n${id}\n\n` +
-          `🔗 Image URL:\n${PUBLIC_URL}/api/image/${id}`
-      )
-
-      return
-    }
-  } catch (error) {
-    console.error('❌ MESSAGE ERROR:', error)
-  }
-})
-
-// ======================================================
-// MEDIA INFO
-// ======================================================
-
-app.get('/api/media/:id', (req, res) => {
-  const media = mediaDB.get(req.params.id)
+app.get('/api/media/:id', (req: Request, res: Response) => {
+  const media = state.getMedia(req.params.id)
 
   if (!media) {
     return res.status(404).json({
       success: false,
-
-      message: 'Media topilmadi',
+      message: 'Media not found',
     })
   }
 
-  return res.json({
+  res.json({
     success: true,
-
     media,
-
-    url: `${PUBLIC_URL}/api/${media.type}/${media.id}`,
+    url: `${config.publicUrl}/api/${media.type}/${media.id}`,
   })
 })
 
-// ======================================================
-// VIDEO
-// ======================================================
+// ============================================================
+// ROUTES - VIDEO STREAMING
+// ============================================================
 
-app.get('/api/video/:id', async (req, res) => {
+app.get('/api/video/:id', async (req: Request, res: Response) => {
   try {
-    const media = mediaDB.get(req.params.id)
+    // Rate limit check
+    if (state.isRateLimited(`/api/video/${req.params.id}`)) {
+      return res.status(429).json({
+        success: false,
+        message: 'Too many requests',
+      })
+    }
+
+    state.recordRequest(`/api/video/${req.params.id}`)
+
+    const media = state.getMedia(req.params.id)
 
     if (!media) {
-      return res.status(404).send('Video topilmadi')
+      return res.status(404).send('Video not found')
     }
 
     if (media.type !== 'video') {
-      return res.status(400).send('Bu video emas')
+      return res.status(400).send('This is not a video')
     }
 
     const totalSize = Number(media.fileSize)
 
     if (!Number.isFinite(totalSize) || totalSize <= 0) {
-      return res.status(500).send('Video hajmi noto‘g‘ri')
+      return res.status(500).send('Invalid video size')
     }
 
-    const range = req.headers.range
+    if (totalSize > PERFORMANCE.MAX_VIDEO_SIZE) {
+      return res.status(400).send('Video too large')
+    }
 
+    // Parse range header
     let start = 0
+    let end = Math.min(PERFORMANCE.CHUNK_SIZE - 1, totalSize - 1)
 
-    let end = Math.min(CHUNK_SIZE - 1, totalSize - 1)
-
-    // ==================================================
-    // RANGE
-    // ==================================================
+    const range = req.headers.range
 
     if (range) {
       const match = range.match(/^bytes=(\d+)-(\d*)$/)
 
       if (!match) {
         res.setHeader('Content-Range', `bytes */${totalSize}`)
-
         return res.status(416).end()
       }
 
@@ -849,133 +660,80 @@ app.get('/api/video/:id', async (req, res) => {
       if (match[2]) {
         end = Number(match[2])
       } else {
-        end = Math.min(
-          start + CHUNK_SIZE - 1,
-
-          totalSize - 1
-        )
+        end = Math.min(start + PERFORMANCE.CHUNK_SIZE - 1, totalSize - 1)
       }
 
       if (start < 0 || start >= totalSize || start > end) {
         res.setHeader('Content-Range', `bytes */${totalSize}`)
-
         return res.status(416).end()
       }
 
       end = Math.min(end, totalSize - 1)
     }
 
-    // ==================================================
-    // LIMIT RANGE
-    // ==================================================
-
-    // Browser juda katta range so'rasa,
-    // faqat CHUNK_SIZE yuboramiz.
-
-    if (end - start + 1 > CHUNK_SIZE) {
-      end = start + CHUNK_SIZE - 1
-
+    // Limit range size
+    if (end - start + 1 > PERFORMANCE.CHUNK_SIZE) {
+      end = start + PERFORMANCE.CHUNK_SIZE - 1
       end = Math.min(end, totalSize - 1)
     }
 
-    // ==================================================
-    // CHUNK ALIGNMENT
-    // ==================================================
+    // Chunk alignment
+    const chunkStart = Math.floor(start / PERFORMANCE.CHUNK_SIZE) * PERFORMANCE.CHUNK_SIZE
+    const chunkEnd = Math.min(chunkStart + PERFORMANCE.CHUNK_SIZE - 1, totalSize - 1)
 
-    const chunkStart = Math.floor(start / CHUNK_SIZE) * CHUNK_SIZE
-
-    const chunkEnd = Math.min(
-      chunkStart + CHUNK_SIZE - 1,
-
-      totalSize - 1
+    logger.debug(
+      {
+        mediaId: media.id,
+        requested: `${start}-${end}`,
+        chunk: `${chunkStart}-${chunkEnd}`,
+        range: range || 'none',
+      },
+      '🎥 Video request'
     )
 
-    console.log('')
-
-    console.log('======================================')
-
-    console.log('🎥 VIDEO REQUEST')
-
-    console.log('ID:', media.id)
-
-    console.log('Requested:', `${start}-${end}`)
-
-    console.log('Chunk:', `${chunkStart}-${chunkEnd}`)
-
-    console.log('Range:', range || 'none')
-
-    // ==================================================
-    // GET CHUNK
-    // ==================================================
-
-    const chunk = await downloadChunk(media, chunkStart, chunkEnd)
+    // Download chunk
+    const chunk = await downloadVideoChunk(media, chunkStart, chunkEnd)
 
     if (!chunk || chunk.length === 0) {
-      return res.status(500).send('Video chunk bo‘sh')
+      return res.status(500).send('Empty chunk')
     }
 
-    // ==================================================
-    // SLICE REQUEST
-    // ==================================================
-
+    // Slice request data
     const relativeStart = start - chunkStart
-
     const relativeEnd = Math.min(end - chunkStart, chunk.length - 1)
 
     if (relativeStart < 0 || relativeStart >= chunk.length) {
-      return res.status(500).send('Chunk range xatosi')
+      return res.status(500).send('Chunk range error')
     }
 
     const data = chunk.subarray(relativeStart, relativeEnd + 1)
 
-    // ==================================================
-    // HEADERS
-    // ==================================================
-
+    // Set response headers
     res.status(range ? 206 : 200)
-
     res.setHeader('Content-Type', media.mimeType || 'video/mp4')
-
     res.setHeader('Accept-Ranges', 'bytes')
-
     res.setHeader('Content-Length', String(data.length))
-
     res.setHeader('Content-Range', `bytes ${start}-${start + data.length - 1}/${totalSize}`)
-
     res.setHeader('Content-Disposition', 'inline')
+    res.setHeader('Cache-Control', 'public, max-age=7200')
+    res.setHeader('X-Cache-Size-MB', state.getCacheSizeMB().toFixed(2))
+    res.setHeader('X-Chunk-Size', `${data.length}`)
 
-    res.setHeader('Cache-Control', 'public, max-age=3600')
-
-    res.setHeader('X-Cache-Size', `${getCacheSizeMB().toFixed(2)}MB`)
-
-    // ==================================================
-    // SEND
-    // ==================================================
-
+    // Send data
     res.end(data)
 
-    // ==================================================
-    // PREFETCH
-    // ==================================================
+    // Prefetch next chunks
+    prefetchNextChunks(media, chunkStart)
 
-    prefetchNextChunk(media, chunkStart)
-
-    console.log(`⚡ SENT ${data.length} bytes`)
-
-    console.log('======================================')
-
-    console.log('')
+    logger.debug(
+      { size: data.length, duration: Date.now() },
+      `⚡ Sent ${data.length} bytes`
+    )
   } catch (error) {
-    console.error('')
-
-    console.error('❌ VIDEO ERROR')
-
-    console.error(error)
-
-    console.error('')
+    logger.error({ error, id: req.params.id }, '❌ Video streaming error')
 
     if (!res.headersSent) {
-      return res.status(500).send('Videoni stream qilishda xato')
+      res.status(500).send('Video streaming error')
     }
 
     if (!res.destroyed) {
@@ -984,130 +742,333 @@ app.get('/api/video/:id', async (req, res) => {
   }
 })
 
-// ======================================================
-// IMAGE
-// ======================================================
+// ============================================================
+// ROUTES - IMAGE
+// ============================================================
 
-app.get('/api/image/:id', async (req, res) => {
+app.get('/api/image/:id', async (req: Request, res: Response) => {
   try {
-    const media = mediaDB.get(req.params.id)
+    state.recordRequest('/api/image')
+
+    const media = state.getMedia(req.params.id)
 
     if (!media) {
-      return res.status(404).send('Rasm topilmadi')
+      return res.status(404).send('Image not found')
     }
 
     if (media.type !== 'photo') {
-      return res.status(400).send('Bu rasm emas')
+      return res.status(400).send('This is not a photo')
     }
 
-    const message = await getTelegramMessage(media)
+    const message = await telegramManager.getMessage(media.chatId, media.messageId)
 
-    const chunks: Buffer[] = []
-
-    if (!message.media) {
-      throw new Error('Telegram media topilmadi')
-    }
-
-    const iterator = client.iterDownload({
-      file: message.media,
-
-      requestSize: TELEGRAM_REQUEST_SIZE,
-    })
-
-    for await (const chunk of iterator) {
-      chunks.push(Buffer.from(chunk))
-    }
-
-    const buffer = Buffer.concat(chunks)
+    const buffer = await telegramManager.downloadChunk(
+      message,
+      media.fileSize,
+      0,
+      media.fileSize - 1
+    )
 
     res.setHeader('Content-Type', media.mimeType || 'image/jpeg')
-
     res.setHeader('Content-Length', String(buffer.length))
-
-    res.setHeader('Cache-Control', 'public, max-age=3600')
+    res.setHeader('Cache-Control', 'public, max-age=7200')
 
     return res.end(buffer)
   } catch (error) {
-    console.error('❌ IMAGE ERROR:', error)
+    logger.error({ error, id: req.params.id }, '❌ Image download error')
 
     if (!res.headersSent) {
-      return res.status(500).send('Rasmni olishda xato')
+      return res.status(500).send('Image download error')
     }
 
     res.destroy()
   }
 })
 
-// ======================================================
-// START
-// ======================================================
+// ============================================================
+// HELPER FUNCTIONS
+// ============================================================
 
-async function start() {
+async function downloadVideoChunk(
+  media: MediaRecord,
+  start: number,
+  end: number
+): Promise<Buffer> {
+  const key = createChunkKey(media.id, start)
+
+  // Check cache
+  const cached = state.getCache(key)
+  if (cached) {
+    logger.debug({ start, end }, '⚡ Cache hit')
+    return cached
+  }
+
+  // Check active download
+  const existing = state.getActiveDownload(key)
+  if (existing) {
+    logger.debug({ start, end }, '⏳ Waiting for existing download')
+    return existing
+  }
+
+  // Create download promise
+  const promise = (async () => {
+    try {
+      state.incrementActiveTelegramDownloads()
+
+      logger.debug({ start, end }, '⬇️ Downloading chunk from Telegram')
+
+      const message = await telegramManager.getMessage(media.chatId, media.messageId)
+
+      const buffer = await telegramManager.downloadChunk(
+        message,
+        media.fileSize,
+        start,
+        end
+      )
+
+      // Cache it
+      state.setCache(key, buffer)
+
+      logger.debug({ size: buffer.length }, `✅ Chunk downloaded and cached`)
+
+      return buffer
+    } finally {
+      state.decrementActiveTelegramDownloads()
+      state.deleteActiveDownload(key)
+    }
+  })()
+
+  state.setActiveDownload(key, promise)
+
+  return promise
+}
+
+function prefetchNextChunks(media: MediaRecord, currentStart: number): void {
+  for (let i = 1; i <= PERFORMANCE.PREFETCH_CHUNKS; i++) {
+    const prefetchStart = currentStart + PERFORMANCE.CHUNK_SIZE * i
+
+    if (prefetchStart >= media.fileSize) break
+
+    const prefetchEnd = Math.min(
+      prefetchStart + PERFORMANCE.CHUNK_SIZE - 1,
+      media.fileSize - 1
+    )
+
+    const key = createChunkKey(media.id, prefetchStart)
+
+    if (state.getCache(key) || state.hasActiveDownload(key)) continue
+
+    // Background prefetch
+    downloadVideoChunk(media, prefetchStart, prefetchEnd).catch((error) => {
+      logger.warn({ error }, '⚠️ Prefetch error')
+    })
+  }
+}
+
+// ============================================================
+// TELEGRAM BOT HANDLERS
+// ============================================================
+
+function setupBotHandlers(telegramManager: TelegramManager): void {
+  const bot = telegramManager.getBot()
+
+  bot.on('message', async (ctx) => {
+    try {
+      const message = ctx.message
+
+      logger.info(
+        { chatId: ctx.chat.id, messageId: message.message_id },
+        '📩 Telegram message received'
+      )
+
+      // Handle video
+      if ('video' in message) {
+        const video = message.video
+
+        const media: MediaRecord = {
+          id: createMediaId(),
+          fileId: video.file_id,
+          chatId: String(ctx.chat.id),
+          messageId: message.message_id,
+          type: 'video',
+          fileSize: video.file_size ?? 0,
+          mimeType: video.mime_type || 'video/mp4',
+          fileName: video.file_name ?? '',
+          width: video.width,
+          height: video.height,
+          duration: video.duration,
+          createdAt: Date.now(),
+          accessCount: 0,
+        }
+
+        state.addMedia(media)
+        logMedia(media)
+
+        await ctx.reply(
+          `🎬 VIDEO READY!\n\n` +
+            `🆔 Media ID:\n\`${media.id}\`\n\n` +
+            `📦 Size:\n${(media.fileSize / 1024 / 1024).toFixed(2)} MB\n\n` +
+            `🎞 MIME:\n${media.mimeType}\n\n` +
+            `🔗 URL:\n${config.publicUrl}/api/video/${media.id}`,
+          { parse_mode: 'MarkdownV2' }
+        )
+
+        return
+      }
+
+      // Handle document video
+      if ('document' in message) {
+        const document = message.document
+
+        const mime = document.mime_type || ''
+        const fileName = document.file_name || ''
+        const isVideo = mime.startsWith('video/') || /\.(mp4|mkv|webm|mov|avi)$/i.test(fileName)
+
+        if (!isVideo) {
+          await ctx.reply('📦 Document received, but it\\'s not a video\\.')
+          return
+        }
+
+        const media: MediaRecord = {
+          id: createMediaId(),
+          fileId: document.file_id,
+          chatId: String(ctx.chat.id),
+          messageId: message.message_id,
+          type: 'video',
+          fileSize: document.file_size ?? 0,
+          mimeType: mime || 'video/mp4',
+          fileName,
+          createdAt: Date.now(),
+          accessCount: 0,
+        }
+
+        state.addMedia(media)
+        logMedia(media)
+
+        await ctx.reply(
+          `🎬 VIDEO FILE READY!\n\n` +
+            `🆔 Media ID:\n\`${media.id}\`\n\n` +
+            `📦 Size:\n${(media.fileSize / 1024 / 1024).toFixed(2)} MB\n\n` +
+            `📁 File:\n${media.fileName}\n\n` +
+            `🔗 URL:\n${config.publicUrl}/api/video/${media.id}`,
+          { parse_mode: 'MarkdownV2' }
+        )
+
+        return
+      }
+
+      // Handle photo
+      if ('photo' in message) {
+        const photos = message.photo
+
+        if (!photos || photos.length === 0) {
+          throw new Error('Photo not found')
+        }
+
+        const photo = photos[photos.length - 1]
+
+        if (!photo) {
+          throw new Error('Photo not found')
+        }
+
+        const media: MediaRecord = {
+          id: createMediaId(),
+          fileId: photo.file_id,
+          chatId: String(ctx.chat.id),
+          messageId: message.message_id,
+          type: 'photo',
+          fileSize: photo.file_size ?? 0,
+          width: photo.width,
+          height: photo.height,
+          createdAt: Date.now(),
+          accessCount: 0,
+        }
+
+        state.addMedia(media)
+        logMedia(media)
+
+        await ctx.reply(
+          `🖼 PHOTO READY!\n\n` +
+            `🆔 Media ID:\n\`${media.id}\`\n\n` +
+            `🔗 URL:\n${config.publicUrl}/api/image/${media.id}`,
+          { parse_mode: 'MarkdownV2' }
+        )
+
+        return
+      }
+    } catch (error) {
+      logger.error({ error }, '❌ Message handler error')
+
+      try {
+        await ctx.reply('❌ Error processing message')
+      } catch {
+        // Ignore reply error
+      }
+    }
+  })
+
+  bot.catch((error) => {
+    logger.error({ error }, '❌ Bot error')
+  })
+}
+
+// ============================================================
+// INITIALIZATION
+// ============================================================
+
+let telegramManager: TelegramManager
+const cacheManager = new CacheManager()
+
+async function start(): Promise<void> {
   try {
-    console.log('')
+    logger.info('🚀 Starting Telegram Media Streaming API')
 
-    console.log('======================================')
+    // Initialize Telegram
+    telegramManager = new TelegramManager(config.token, config.apiId, config.apiHash)
+    await telegramManager.connect()
 
-    console.log('🔌 TELEGRAM MTProto')
+    // Setup bot handlers
+    setupBotHandlers(telegramManager)
 
-    console.log('======================================')
+    // Start cache manager
+    cacheManager.start()
 
-    await client.start({
-      botAuthToken: BOT_TOKEN,
+    // Start Express server
+    const server = app.listen(config.port, '0.0.0.0', () => {
+      logger.info(
+        {
+          port: config.port,
+          publicUrl: config.publicUrl,
+          chunkSizeMB: PERFORMANCE.CHUNK_SIZE / 1024 / 1024,
+          cacheSizeMB: PERFORMANCE.MAX_CACHE_BYTES / 1024 / 1024,
+          parallelDownloads: PERFORMANCE.MAX_TELEGRAM_DOWNLOADS,
+        },
+        '🚀 API Server started'
+      )
     })
 
-    console.log('✅ MTProto ulandi!')
+    // Graceful shutdown
+    process.on('SIGINT', async () => {
+      logger.info('Shutting down...')
 
-    console.log('Telegram connected:', client.connected)
-
-    // ==================================================
-    // EXPRESS
-    // ==================================================
-
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log('')
-
-      console.log('======================================')
-
-      console.log(`🚀 API: ${PUBLIC_URL}`)
-
-      console.log(`🚀 PORT: ${PORT}`)
-
-      console.log(`⚡ Chunk: ${CHUNK_SIZE / 1024 / 1024} MB`)
-
-      console.log(`💾 Cache: ${MAX_CACHE_BYTES / 1024 / 1024} MB`)
-
-      console.log(`🔄 Telegram parallel: ${MAX_TELEGRAM_DOWNLOADS}`)
-
-      console.log('======================================')
-
-      console.log('')
+      server.close(async () => {
+        cacheManager.stop()
+        logger.info('Server closed')
+        process.exit(0)
+      })
     })
 
-    // ==================================================
-    // BOT
-    // ==================================================
-
-    bot.start()
-
-    console.log('🤖 BOT ISHLADI!')
-
-    console.log('🎬 Video yuborishingiz mumkin.')
+    // Start bot
+    telegramManager.getBot().start()
+    logger.info('🤖 Telegram bot started')
   } catch (error) {
-    console.error('')
-
-    console.error('❌ SERVER ERROR')
-
-    console.error(error)
-
-    console.error('')
-
+    logger.error({ error }, '❌ Startup failed')
     process.exit(1)
   }
 }
 
-// ======================================================
+// ============================================================
 // RUN
-// ======================================================
+// ============================================================
 
 start()
