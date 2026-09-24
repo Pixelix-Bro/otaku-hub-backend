@@ -917,10 +917,10 @@ function setupBotHandlers(telegramManager: TelegramManager): void {
 
         await ctx.reply(
           `🎬 VIDEO READY!\n\n` +
-          `🆔 Media ID: ${media.id}\n\n` +
-          `📦 Size: ${(media.fileSize / 1024 / 1024).toFixed(2)} MB\n\n` +
-          `🎞 MIME: ${media.mimeType}\n\n` +
-          `🔗 URL: ${config.publicUrl}/api/video/${media.id}`
+            `🆔 Media ID: ${media.id}\n\n` +
+            `📦 Size: ${(media.fileSize / 1024 / 1024).toFixed(2)} MB\n\n` +
+            `🎞 MIME: ${media.mimeType}\n\n` +
+            `🔗 URL: ${config.publicUrl}/api/video/${media.id}`,
         );
 
         return;
@@ -959,10 +959,10 @@ function setupBotHandlers(telegramManager: TelegramManager): void {
 
         await ctx.reply(
           `🎬 VIDEO FILE READY!\n\n` +
-          `🆔 Media ID: ${media.id}\n\n` +
-          `📦 Size: ${(media.fileSize / 1024 / 1024).toFixed(2)} MB\n\n` +
-          `📁 File: ${media.fileName}\n\n` +
-          `🔗 URL: ${config.publicUrl}/api/video/${media.id}`
+            `🆔 Media ID: ${media.id}\n\n` +
+            `📦 Size: ${(media.fileSize / 1024 / 1024).toFixed(2)} MB\n\n` +
+            `📁 File: ${media.fileName}\n\n` +
+            `🔗 URL: ${config.publicUrl}/api/video/${media.id}`,
         );
 
         return;
@@ -1000,20 +1000,30 @@ function setupBotHandlers(telegramManager: TelegramManager): void {
 
         await ctx.reply(
           `🖼 PHOTO READY!\n\n` +
-            `🆔 Media ID:\n\`${media.id}\`\n\n` +
-          `🆔 Media ID: ${media.id}\n\n` +
-          `🔗 URL: ${config.publicUrl}/api/image/${media.id}`
+            `🆔 Media ID: ${media.id}\n\n` +
+            `🔗 URL: ${config.publicUrl}/api/image/${media.id}`,
+        );
 
         return;
       }
     } catch (error) {
-      logger.error({ error }, "❌ Message handler error");
-, errorMessage: (error as Error).message, stack: (error as Error).stack }, "❌ Message handler error");
+      logger.error(
+        {
+          error,
+          errorMessage: (error as Error).message,
+          stack: (error as Error).stack,
+        },
+        "❌ Message handler error",
+      );
 
       try {
-        await ctx.reply("❌ Error processing message: " + ((error as Error).message || "Unknown error"));
+        await ctx.reply(
+          "❌ Error processing message: " +
+            ((error as Error).message || "Unknown error"),
+        );
       } catch (replyError) {
         logger.error({ replyError }, "Failed to send error reply");
+      }
     }
   });
 
