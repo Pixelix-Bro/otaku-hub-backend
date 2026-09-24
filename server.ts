@@ -719,7 +719,15 @@ app.get("/api/video/:id", async (req: Request, res: Response) => {
       "Content-Range",
       `bytes ${start}-${start + data.length - 1}/${totalSize}`,
     );
-    res.setHeader("Content-Disposition", "inline");
+
+    // Handle download parameter
+    const isDownload =
+      req.query.download === "1" || req.query.download === "true";
+    const fileName = media.fileName || `media_${media.id}.mp4`;
+    res.setHeader(
+      "Content-Disposition",
+      isDownload ? `attachment; filename="${fileName}"` : "inline",
+    );
     res.setHeader("Cache-Control", "public, max-age=7200");
     res.setHeader("X-Cache-Size-MB", state.getCacheSizeMB().toFixed(2));
     res.setHeader("X-Chunk-Size", `${data.length}`);
@@ -780,6 +788,15 @@ app.get("/api/image/:id", async (req: Request, res: Response) => {
     res.setHeader("Content-Type", media.mimeType || "image/jpeg");
     res.setHeader("Content-Length", String(buffer.length));
     res.setHeader("Cache-Control", "public, max-age=7200");
+
+    // Handle download parameter
+    const isDownload =
+      req.query.download === "1" || req.query.download === "true";
+    const fileName = media.fileName || `image_${media.id}.jpg`;
+    res.setHeader(
+      "Content-Disposition",
+      isDownload ? `attachment; filename="${fileName}"` : "inline",
+    );
 
     return res.end(buffer);
   } catch (error) {
@@ -895,6 +912,13 @@ function setupBotHandlers(telegramManager: TelegramManager): void {
       // Handle video
       if ("video" in message) {
         const video = message.video;
+        const sizeMB = (
+          video.file_size ? video.file_size / 1024 / 1024 : 0
+        ).toFixed(2);
+        const durationMin = video.duration
+          ? Math.floor(video.duration / 60)
+          : 0;
+        const durationSec = video.duration ? video.duration % 60 : 0;
 
         const media: MediaRecord = {
           id: createMediaId(),
@@ -904,7 +928,7 @@ function setupBotHandlers(telegramManager: TelegramManager): void {
           type: "video",
           fileSize: video.file_size ?? 0,
           mimeType: video.mime_type || "video/mp4",
-          fileName: video.file_name ?? "",
+          fileName: video.file_name ?? "video.mp4",
           width: video.width,
           height: video.height,
           duration: video.duration,
@@ -915,14 +939,21 @@ function setupBotHandlers(telegramManager: TelegramManager): void {
         state.addMedia(media);
         logMedia(media);
 
-        await ctx.reply(
-          `🎬 VIDEO READY!\n\n` +
-            `🆔 Media ID: ${media.id}\n\n` +
-            `📦 Size: ${(media.fileSize / 1024 / 1024).toFixed(2)} MB\n\n` +
-            `🎞 MIME: ${media.mimeType}\n\n` +
-            `🔗 URL: ${config.publicUrl}/api/video/${media.id}`,
-        );
+        const videoUrl = `${config.publicUrl}/api/video/${media.id}`;
+        const replyText =
+          `✅ VIDEO SAVED!\n\n` +
+          `🆔 Media ID:\n${media.id}\n\n` +
+          `📊 Ma'lumotlar:\n` +
+          `  📦 Size: ${sizeMB} MB\n` +
+          `  ⏱ Duration: ${durationMin}:${String(durationSec).padStart(2, "0")} min\n` +
+          `  📐 Resolution: ${video.width || "?"}x${video.height || "?"} px\n` +
+          `  🎬 Format: ${media.mimeType}\n\n` +
+          `🔗 Links:\n` +
+          `  👁 View: ${videoUrl}\n` +
+          `  ⬇️ Download: ${videoUrl}?download=1\n\n` +
+          `✨ Media qabul qilindi va tayyor!`;
 
+        await ctx.reply(replyText);
         return;
       }
 
@@ -931,15 +962,19 @@ function setupBotHandlers(telegramManager: TelegramManager): void {
         const document = message.document;
 
         const mime = document.mime_type || "";
-        const fileName = document.file_name || "";
+        const fileName = document.file_name || "file";
         const isVideo =
           mime.startsWith("video/") ||
           /\.(mp4|mkv|webm|mov|avi)$/i.test(fileName);
 
         if (!isVideo) {
-          await ctx.reply("📦 Document received, but it's not a video.");
+          await ctx.reply("❌ Faqat video fayllar qabul qilinadi!");
           return;
         }
+
+        const sizeMB = (
+          document.file_size ? document.file_size / 1024 / 1024 : 0
+        ).toFixed(2);
 
         const media: MediaRecord = {
           id: createMediaId(),
@@ -957,14 +992,20 @@ function setupBotHandlers(telegramManager: TelegramManager): void {
         state.addMedia(media);
         logMedia(media);
 
-        await ctx.reply(
-          `🎬 VIDEO FILE READY!\n\n` +
-            `🆔 Media ID: ${media.id}\n\n` +
-            `📦 Size: ${(media.fileSize / 1024 / 1024).toFixed(2)} MB\n\n` +
-            `📁 File: ${media.fileName}\n\n` +
-            `🔗 URL: ${config.publicUrl}/api/video/${media.id}`,
-        );
+        const videoUrl = `${config.publicUrl}/api/video/${media.id}`;
+        const replyText =
+          `✅ VIDEO FAYL SAVED!\n\n` +
+          `🆔 Media ID:\n${media.id}\n\n` +
+          `📊 Ma'lumotlar:\n` +
+          `  📦 Size: ${sizeMB} MB\n` +
+          `  📁 Fayl: ${fileName}\n` +
+          `  🎬 Format: ${media.mimeType}\n\n` +
+          `🔗 Links:\n` +
+          `  👁 View: ${videoUrl}\n` +
+          `  ⬇️ Download: ${videoUrl}?download=1\n\n` +
+          `✨ Tayyor!`;
 
+        await ctx.reply(replyText);
         return;
       }
 
@@ -982,6 +1023,10 @@ function setupBotHandlers(telegramManager: TelegramManager): void {
           throw new Error("Photo not found");
         }
 
+        const sizeMB = (
+          photo.file_size ? photo.file_size / 1024 / 1024 : 0
+        ).toFixed(2);
+
         const media: MediaRecord = {
           id: createMediaId(),
           fileId: photo.file_id,
@@ -995,6 +1040,22 @@ function setupBotHandlers(telegramManager: TelegramManager): void {
           accessCount: 0,
         };
 
+        state.addMedia(media);
+        logMedia(media);
+
+        const imageUrl = `${config.publicUrl}/api/image/${media.id}`;
+        const replyText =
+          `✅ RASM SAVED!\n\n` +
+          `🆔 Media ID:\n${media.id}\n\n` +
+          `📊 Ma'lumotlar:\n` +
+          `  📦 Size: ${sizeMB} MB\n` +
+          `  📐 Resolution: ${photo.width || "?"}x${photo.height || "?"} px\n\n` +
+          `🔗 Links:\n` +
+          `  👁 View: ${imageUrl}\n` +
+          `  ⬇️ Download: ${imageUrl}?download=1\n\n` +
+          `✨ Tayyor!`;
+
+        await ctx.reply(replyText);
         state.addMedia(media);
         logMedia(media);
 
