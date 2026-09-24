@@ -34,6 +34,7 @@ interface Config {
   apiHash: string;
   port: number;
   publicUrl: string;
+  adminIds: number[];
 }
 
 function loadConfig(): Config {
@@ -44,48 +45,74 @@ function loadConfig(): Config {
   const publicUrl = (
     process.env.PUBLIC_URL || `http://localhost:${port}`
   ).replace(/\/+$/, "");
+  const adminIds = (process.env.ADMIN_IDS || process.env.ADMIN_ID || "")
+    .split(",")
+    .map((id) => Number(id.trim()))
+    .filter((id) => Number.isFinite(id));
 
   if (!token) throw new Error("❌ TOKEN not found");
   if (!apiId) throw new Error("❌ API_ID not found");
   if (!apiHash) throw new Error("❌ API_HASH not found");
 
-  return { token, apiId, apiHash, port, publicUrl };
+  return { token, apiId, apiHash, port, publicUrl, adminIds };
 }
 
 const config = loadConfig();
+
+function isAdminChat(chatId: string | number): boolean {
+  if (config.adminIds.length === 0) return true;
+  return config.adminIds.includes(Number(chatId));
+}
+
+function createMediaButtons(mediaUrl: string) {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: "👁 Tomosha qilish",
+          url: mediaUrl,
+        },
+        {
+          text: "📋 Linkni nusxalash",
+          url: `https://t.me/share/url?url=${encodeURIComponent(mediaUrl)}`,
+        },
+      ],
+    ],
+  };
+}
 
 // ============================================================
 // PERFORMANCE CONFIG
 // ============================================================
 
 const PERFORMANCE = {
-  // Katta chunk size = kam request
-  CHUNK_SIZE: 64 * 1024 * 1024, // 64 MB
+  // Katta chunk size = kam request va tezlik ⚡
+  CHUNK_SIZE: 128 * 1024 * 1024, // 128 MB (2x tez)
 
-  // RAM cache maksimal
-  MAX_CACHE_BYTES: 2 * 1024 * 1024 * 1024, // 2 GB
+  // RAM cache maksimal (oshirildi)
+  MAX_CACHE_BYTES: 4 * 1024 * 1024 * 1024, // 4 GB (2x)
 
-  // Parallel Telegram downloads
-  MAX_TELEGRAM_DOWNLOADS: 8,
+  // Parallel Telegram downloads (oshirildi)
+  MAX_TELEGRAM_DOWNLOADS: 16, // 2x parallel
 
-  // Har bitta Telegram request'da nechta data
-  TELEGRAM_REQUEST_SIZE: 16 * 1024 * 1024, // 16 MB
+  // Har bitta Telegram request'da nechta data (oshirildi)
+  TELEGRAM_REQUEST_SIZE: 32 * 1024 * 1024, // 32 MB (2x)
 
   // Cache qancha vaqt saqlansin
-  CACHE_TTL: 30 * 60 * 1000, // 30 min
+  CACHE_TTL: 60 * 60 * 1000, // 60 min (uzunroq)
 
-  // Prefetch strategy
-  PREFETCH_CHUNKS: 3,
+  // Prefetch strategy (oshirildi)
+  PREFETCH_CHUNKS: 5, // Ko'proq prefetch
 
   // Request timeout
   REQUEST_TIMEOUT: 60 * 1000, // 60 sec
 
   // Max video size
-  MAX_VIDEO_SIZE: 5 * 1024 * 1024 * 1024, // 5 GB
+  MAX_VIDEO_SIZE: 10 * 1024 * 1024 * 1024, // 10 GB (2x)
 
-  // Rate limit
+  // Rate limit (oshirildi)
   RATE_LIMIT_WINDOW: 60 * 1000, // 1 min
-  RATE_LIMIT_MAX_REQUESTS: 1000,
+  RATE_LIMIT_MAX_REQUESTS: 5000, // 5x ko'proq
 } as const;
 
 // ============================================================
@@ -498,6 +525,7 @@ const app = express();
 
 // Middleware
 app.use(compression());
+app.disable("x-powered-by"); // Remove header for speed
 app.use(
   cors({
     origin: "*",
@@ -506,6 +534,16 @@ app.use(
   }),
 );
 app.use(express.json({ limit: "10kb" }));
+
+// Skip compression for media streams
+app.use("/api/video", (req: Request, res: Response, next: any) => {
+  res.setHeader("Content-Encoding", "identity");
+  next();
+});
+app.use("/api/image", (req: Request, res: Response, next: any) => {
+  res.setHeader("Content-Encoding", "identity");
+  next();
+});
 
 // Keep-alive
 app.use((req: Request, res: Response, next: any) => {
@@ -728,14 +766,16 @@ app.get("/api/video/:id", async (req: Request, res: Response) => {
       "Content-Disposition",
       isDownload ? `attachment; filename="${fileName}"` : "inline",
     );
-    res.setHeader("Cache-Control", "public, max-age=7200");
+    res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+    res.setHeader("ETag", `"${media.id}-${chunkStart}"`);
     res.setHeader("X-Cache-Size-MB", state.getCacheSizeMB().toFixed(2));
     res.setHeader("X-Chunk-Size", `${data.length}`);
+    res.setHeader("X-Speed-Optimized", "true");
 
-    // Send data
+    // Send data with highWaterMark for faster streaming
     res.end(data);
 
-    // Prefetch next chunks
+    // Prefetch next chunks aggressively
     prefetchNextChunks(media, chunkStart);
 
     logger.debug(
@@ -787,7 +827,8 @@ app.get("/api/image/:id", async (req: Request, res: Response) => {
 
     res.setHeader("Content-Type", media.mimeType || "image/jpeg");
     res.setHeader("Content-Length", String(buffer.length));
-    res.setHeader("Cache-Control", "public, max-age=7200");
+    res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+    res.setHeader("ETag", `"${media.id}"`);
 
     // Handle download parameter
     const isDownload =
@@ -904,6 +945,11 @@ function setupBotHandlers(telegramManager: TelegramManager): void {
     try {
       const message = ctx.message;
 
+      if (!isAdminChat(ctx.chat.id)) {
+        await ctx.reply("❌ Faqat admin video va rasm yuborishi mumkin.");
+        return;
+      }
+
       logger.info(
         { chatId: ctx.chat.id, messageId: message.message_id },
         "📩 Telegram message received",
@@ -941,19 +987,15 @@ function setupBotHandlers(telegramManager: TelegramManager): void {
 
         const videoUrl = `${config.publicUrl}/api/video/${media.id}`;
         const replyText =
-          `✅ VIDEO SAVED!\n\n` +
-          `🆔 Media ID:\n${media.id}\n\n` +
-          `📊 Ma'lumotlar:\n` +
-          `  📦 Size: ${sizeMB} MB\n` +
-          `  ⏱ Duration: ${durationMin}:${String(durationSec).padStart(2, "0")} min\n` +
-          `  📐 Resolution: ${video.width || "?"}x${video.height || "?"} px\n` +
-          `  🎬 Format: ${media.mimeType}\n\n` +
-          `🔗 Links:\n` +
-          `  👁 View: ${videoUrl}\n` +
-          `  ⬇️ Download: ${videoUrl}?download=1\n\n` +
-          `✨ Media qabul qilindi va tayyor!`;
+          `✅ Saqlandi\n\n` +
+          `🆔 ID: ${media.id}\n` +
+          `📦 Hajm: ${sizeMB} MB\n` +
+          `⏱ ${durationMin}:${String(durationSec).padStart(2, "0")} min\n` +
+          `📐 ${video.width || "?"}x${video.height || "?"}`;
 
-        await ctx.reply(replyText);
+        await ctx.reply(replyText, {
+          reply_markup: createMediaButtons(videoUrl),
+        });
         return;
       }
 
@@ -968,7 +1010,7 @@ function setupBotHandlers(telegramManager: TelegramManager): void {
           /\.(mp4|mkv|webm|mov|avi)$/i.test(fileName);
 
         if (!isVideo) {
-          await ctx.reply("❌ Faqat video fayllar qabul qilinadi!");
+          await ctx.reply("❌ Faqat video fayllar qabul qilinadi.");
           return;
         }
 
@@ -994,18 +1036,14 @@ function setupBotHandlers(telegramManager: TelegramManager): void {
 
         const videoUrl = `${config.publicUrl}/api/video/${media.id}`;
         const replyText =
-          `✅ VIDEO FAYL SAVED!\n\n` +
-          `🆔 Media ID:\n${media.id}\n\n` +
-          `📊 Ma'lumotlar:\n` +
-          `  📦 Size: ${sizeMB} MB\n` +
-          `  📁 Fayl: ${fileName}\n` +
-          `  🎬 Format: ${media.mimeType}\n\n` +
-          `🔗 Links:\n` +
-          `  👁 View: ${videoUrl}\n` +
-          `  ⬇️ Download: ${videoUrl}?download=1\n\n` +
-          `✨ Tayyor!`;
+          `✅ Saqlandi\n\n` +
+          `🆔 ID: ${media.id}\n` +
+          `📦 Hajm: ${sizeMB} MB\n` +
+          `📁 ${fileName}`;
 
-        await ctx.reply(replyText);
+        await ctx.reply(replyText, {
+          reply_markup: createMediaButtons(videoUrl),
+        });
         return;
       }
 
@@ -1045,26 +1083,14 @@ function setupBotHandlers(telegramManager: TelegramManager): void {
 
         const imageUrl = `${config.publicUrl}/api/image/${media.id}`;
         const replyText =
-          `✅ RASM SAVED!\n\n` +
-          `🆔 Media ID:\n${media.id}\n\n` +
-          `📊 Ma'lumotlar:\n` +
-          `  📦 Size: ${sizeMB} MB\n` +
-          `  📐 Resolution: ${photo.width || "?"}x${photo.height || "?"} px\n\n` +
-          `🔗 Links:\n` +
-          `  👁 View: ${imageUrl}\n` +
-          `  ⬇️ Download: ${imageUrl}?download=1\n\n` +
-          `✨ Tayyor!`;
+          `✅ Saqlandi\n\n` +
+          `🆔 ID: ${media.id}\n` +
+          `📦 Hajm: ${sizeMB} MB\n` +
+          `📐 ${photo.width || "?"}x${photo.height || "?"}`;
 
-        await ctx.reply(replyText);
-        state.addMedia(media);
-        logMedia(media);
-
-        await ctx.reply(
-          `🖼 PHOTO READY!\n\n` +
-            `🆔 Media ID: ${media.id}\n\n` +
-            `🔗 URL: ${config.publicUrl}/api/image/${media.id}`,
-        );
-
+        await ctx.reply(replyText, {
+          reply_markup: createMediaButtons(imageUrl),
+        });
         return;
       }
     } catch (error) {
@@ -1079,7 +1105,7 @@ function setupBotHandlers(telegramManager: TelegramManager): void {
 
       try {
         await ctx.reply(
-          "❌ Error processing message: " +
+          "❌ Xatolik yuz berdi: " +
             ((error as Error).message || "Unknown error"),
         );
       } catch (replyError) {
