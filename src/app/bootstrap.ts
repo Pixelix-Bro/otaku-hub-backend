@@ -56,10 +56,13 @@ export async function bootstrap(): Promise<ReturnType<typeof Fastify>> {
   app.get('/health/live', async () => ({ ok: true, status: 'live' }))
   app.get('/health/ready', async (_, reply) => {
     const mongoHealthy = await isMongoDBHealthy()
-    const workerReady = await new MtprotoWorkerClient(
-      config.telegramWorkerUrl!,
-      config.telegramWorkerSecret!
-    ).isReady()
+    const workerConfigured = Boolean(config.telegramWorkerUrl && config.telegramWorkerSecret)
+    const workerReady = workerConfigured
+      ? await new MtprotoWorkerClient(
+          config.telegramWorkerUrl!,
+          config.telegramWorkerSecret!
+        ).isReady()
+      : false
     const ready = startupReady && mongoHealthy && workerReady
     return reply.code(ready ? 200 : 503).send({
       ok: ready,
@@ -70,10 +73,13 @@ export async function bootstrap(): Promise<ReturnType<typeof Fastify>> {
   })
   app.get('/health', async (_, reply) => {
     const mongoHealthy = await isMongoDBHealthy()
-    const workerReady = await new MtprotoWorkerClient(
-      config.telegramWorkerUrl!,
-      config.telegramWorkerSecret!
-    ).isReady()
+    const workerConfigured = Boolean(config.telegramWorkerUrl && config.telegramWorkerSecret)
+    const workerReady = workerConfigured
+      ? await new MtprotoWorkerClient(
+          config.telegramWorkerUrl!,
+          config.telegramWorkerSecret!
+        ).isReady()
+      : false
     const ready = startupReady && mongoHealthy && workerReady
     return reply.code(ready ? 200 : 503).send({
       ok: ready,

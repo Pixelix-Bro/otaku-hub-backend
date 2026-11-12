@@ -92,22 +92,41 @@ export function loadConfig(): AppConfig {
     throw new Error('❌ BOT_API_DOWNLOAD_MAX_BYTES must be a positive integer below 20 MiB.')
   }
 
-  const mtprotoApiId = Number(requireEnv('API_ID'))
-  if (!Number.isSafeInteger(mtprotoApiId) || mtprotoApiId <= 0) {
+  const mtprotoApiIdRaw = optionalEnv('API_ID')
+  const mtprotoApiHashRaw = optionalEnv('API_HASH')
+  const telegramWorkerUrlRaw = optionalEnv('TELEGRAM_WORKER_URL')
+  const telegramWorkerSecretRaw = optionalEnv('TELEGRAM_WORKER_SECRET')
+  const mtprotoValues = [
+    mtprotoApiIdRaw,
+    mtprotoApiHashRaw,
+    telegramWorkerUrlRaw,
+    telegramWorkerSecretRaw,
+  ]
+  const mtprotoConfiguredCount = mtprotoValues.filter(Boolean).length
+  if (mtprotoConfiguredCount !== 0 && mtprotoConfiguredCount !== mtprotoValues.length) {
+    throw new Error(
+      'Configure API_ID, API_HASH, TELEGRAM_WORKER_URL, and TELEGRAM_WORKER_SECRET together to enable MTProto streaming.'
+    )
+  }
+
+  const mtprotoApiId = mtprotoApiIdRaw ? Number(mtprotoApiIdRaw) : undefined
+  if (mtprotoApiIdRaw && (!Number.isSafeInteger(mtprotoApiId) || (mtprotoApiId ?? 0) <= 0)) {
     throw new Error('API_ID must be a positive integer.')
   }
-  const mtprotoApiHash = requireEnv('API_HASH')
-  const telegramWorkerUrl = requireEnv('TELEGRAM_WORKER_URL').replace(/\/+$/, '')
-  let parsedWorkerUrl: URL
-  try {
-    parsedWorkerUrl = new URL(telegramWorkerUrl)
-  } catch {
-    throw new Error('TELEGRAM_WORKER_URL must be an absolute HTTP(S) URL.')
+  const mtprotoApiHash = mtprotoApiHashRaw || undefined
+  const telegramWorkerUrl = telegramWorkerUrlRaw.replace(/\/+$/, '') || undefined
+  if (telegramWorkerUrl) {
+    let parsedWorkerUrl: URL
+    try {
+      parsedWorkerUrl = new URL(telegramWorkerUrl)
+    } catch {
+      throw new Error('TELEGRAM_WORKER_URL must be an absolute HTTP(S) URL.')
+    }
+    if (parsedWorkerUrl.protocol !== 'http:' && parsedWorkerUrl.protocol !== 'https:') {
+      throw new Error('TELEGRAM_WORKER_URL must use HTTP or HTTPS.')
+    }
   }
-  if (parsedWorkerUrl.protocol !== 'http:' && parsedWorkerUrl.protocol !== 'https:') {
-    throw new Error('TELEGRAM_WORKER_URL must use HTTP or HTTPS.')
-  }
-  const telegramWorkerSecret = requireEnv('TELEGRAM_WORKER_SECRET')
+  const telegramWorkerSecret = telegramWorkerSecretRaw || undefined
 
   const streamChunkBytes = Number(optionalEnv('STREAM_CHUNK_BYTES', '524288'))
   const maxActiveStreams = Number(optionalEnv('MAX_ACTIVE_STREAMS', '10'))

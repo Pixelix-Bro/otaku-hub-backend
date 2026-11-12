@@ -18,10 +18,6 @@ Copy [.env.example](.env.example) and replace the placeholders with real values.
 Required variables include:
 
 - `BOT_TOKEN`
-- `API_ID`
-- `API_HASH`
-- `TELEGRAM_WORKER_URL`
-- `TELEGRAM_WORKER_SECRET`
 - `TELEGRAM_STORAGE_CHAT_ID`
 - `TELEGRAM_WEBHOOK_SECRET`
 - `TELEGRAM_ADMIN_IDS`
@@ -39,7 +35,7 @@ Legacy keys remain accepted for backward compatibility, including `TELEGRAM_BOT_
 
 ## Local development
 
-Set the required backend variables in `.env`, including the worker private URL (`http://127.0.0.1:8000`) and the same `TELEGRAM_WORKER_SECRET` used by the worker. Then start the worker and API in separate terminals:
+Set the required bot/backend variables in `.env`. MTProto is an optional all-or-none group: set `API_ID`, `API_HASH`, `TELEGRAM_WORKER_URL`, and `TELEGRAM_WORKER_SECRET` together to enable worker streaming. Without them the bot and small Bot API previews can run, but large-file streaming stays unavailable and readiness reports the worker offline. When enabling it locally, use `http://127.0.0.1:8000` and the same secret for API and worker.
 
 ```bash
 npm install

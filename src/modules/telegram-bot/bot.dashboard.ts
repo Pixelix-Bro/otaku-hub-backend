@@ -91,6 +91,7 @@ async function getStatistics() {
 
 export async function renderDashboard(): Promise<DashboardView> {
   const config = getConfig()
+  const workerConfigured = Boolean(config.telegramWorkerUrl && config.telegramWorkerSecret)
   const [database, telegram, storage, worker, api, website, statistics] = await Promise.all([
     isMongoDBHealthy().catch(() => false),
     getTelegramService()
@@ -103,7 +104,9 @@ export async function renderDashboard(): Promise<DashboardView> {
       .validate()
       .then(() => true)
       .catch(() => false),
-    new MtprotoWorkerClient(config.telegramWorkerUrl!, config.telegramWorkerSecret!).isReady(),
+    workerConfigured
+      ? new MtprotoWorkerClient(config.telegramWorkerUrl!, config.telegramWorkerSecret!).isReady()
+      : Promise.resolve(false),
     checkWebsite(`${config.publicApiUrl}/health/live`),
     checkWebsite(config.publicWebUrl),
     isMongoDBHealthy()
@@ -190,9 +193,12 @@ export async function renderStatistics(): Promise<DashboardView> {
 
 export async function renderMonitor(): Promise<DashboardView> {
   const config = getConfig()
+  const workerConfigured = Boolean(config.telegramWorkerUrl && config.telegramWorkerSecret)
   const [database, worker, telegram, storage] = await Promise.all([
     isMongoDBHealthy().catch(() => false),
-    new MtprotoWorkerClient(config.telegramWorkerUrl!, config.telegramWorkerSecret!).isReady(),
+    workerConfigured
+      ? new MtprotoWorkerClient(config.telegramWorkerUrl!, config.telegramWorkerSecret!).isReady()
+      : Promise.resolve(false),
     getTelegramService()
       .getBotApiClient()
       .getMe()
