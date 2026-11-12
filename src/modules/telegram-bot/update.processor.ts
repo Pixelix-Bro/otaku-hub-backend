@@ -413,7 +413,15 @@ async function processAdminCommand(message: TelegramMessage): Promise<void> {
         })
         previewSize = info.file_size
         largeFileWorkerReady = true
-      } catch {
+      } catch (error) {
+        logger.warn(
+          {
+            mediaId: media.mediaId,
+            workerFailure: error instanceof Error ? error.message : 'unknown-worker-error',
+          },
+          'MTProto could not refresh preview media metadata'
+        )
+        
         largeFileWorkerReady = false
       }
     }
