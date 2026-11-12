@@ -163,7 +163,6 @@ async function processAdminUpload(message: TelegramMessage): Promise<void> {
     await watchTokens.create({ ...token, usedCount: 0 })
 
     const webPreviewUrl =
-      media.visibility === 'public' &&
       metadata.sizeBytes !== null &&
       metadata.sizeBytes <= config.botApiDownloadMaxBytes &&
       config.publicApiUrl
@@ -215,7 +214,7 @@ async function processAdminCommand(message: TelegramMessage): Promise<void> {
   if (command === '/help') {
     await reply(
       message,
-      '/start, /stats, /list, /get MEDIA_ID, /search QUERY, /visibility MEDIA_ID public|private, /delete MEDIA_ID, /status, /reconcile'
+      '/start, /stats, /list, /get MEDIA_ID, /preview MEDIA_ID, /search QUERY, /visibility MEDIA_ID public|private, /delete MEDIA_ID, /status, /reconcile'
     )
     return
   }
@@ -280,6 +279,35 @@ async function processAdminCommand(message: TelegramMessage): Promise<void> {
     await getTelegramService()
       .getStorageChannel()
       .copyMediaToUser(media.storageMessageId, message.chat.id)
+    return
+  }
+  if (command === '/preview') {
+    const mediaId = args[0]?.toUpperCase()
+    const media = mediaId ? await getMediaById(mediaId) : null
+    if (!media || media.storageStatus !== 'stored' || media.storageMessageId === null) {
+      await reply(message, 'Stored media topilmadi. Foydalanish: /preview MEDIA_ID')
+      return
+    }
+    if (media.sizeBytes === null || media.sizeBytes > config.botApiDownloadMaxBytes) {
+      await reply(
+        message,
+        `Web preview faqat ${formatFileSize(config.botApiDownloadMaxBytes)} gacha ishlaydi; bu media Telegram Bot API preview limitidan katta yoki hajmi noma’lum.`
+      )
+      return
+    }
+    if (!config.publicApiUrl) {
+      await reply(message, 'Web preview uchun PUBLIC_API_URL sozlanmagan.')
+      return
+    }
+
+    const token = createWatchTokenData({
+      mediaId: media.mediaId,
+      expiresAt: new Date(Date.now() + config.watchTokenTtlSeconds * 1000),
+      maxUses: config.maxWatchTokenUses,
+    })
+    await watchTokens.create({ ...token, usedCount: 0 })
+    const previewUrl = `${buildPreviewUrl(config.publicApiUrl, media.mediaId)}?token=${encodeURIComponent(token.token)}`
+    await reply(message, `🌐 Web Preview: ${previewUrl}`)
     return
   }
   if (command === '/visibility') {

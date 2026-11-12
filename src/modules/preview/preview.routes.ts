@@ -39,11 +39,6 @@ export async function previewRoutes(app: FastifyInstance): Promise<void> {
       if (!media || media.storageStatus !== 'stored' || media.storageMessageId === null) {
         return reply.code(404).send({ ok: false, error: 'Stored media not found' })
       }
-      if (media.visibility !== 'public') {
-        return reply
-          .code(403)
-          .send({ ok: false, error: 'Web preview is not available for private media' })
-      }
       if (media.sizeBytes === null || media.sizeBytes > config.botApiDownloadMaxBytes) {
         return reply
           .code(413)

@@ -58,7 +58,7 @@ export function loadConfig(): AppConfig {
     throw new Error('❌ BOT_TOKEN format is invalid. Expected format: 123456:ABC-DEF...')
   }
 
-  const publicApiUrl = optionalEnv('PUBLIC_BASE_URL', optionalEnv('PUBLIC_API_URL', '')).replace(
+  const publicApiUrl = optionalEnv('PUBLIC_API_URL', optionalEnv('PUBLIC_BASE_URL', '')).replace(
     /\/+$/,
     ''
   )
