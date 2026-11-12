@@ -46,8 +46,8 @@ export interface WatchTokenDocument {
   _id?: ObjectId;
   tokenHash: string;
   mediaId: string;
-  expiresAt: Date;
-  maxUses: number;
+  expiresAt?: Date;
+  maxUses?: number;
   usedCount: number;
   createdAt: Date;
 }
@@ -172,7 +172,7 @@ export interface TelegramUpdate {
     from: TelegramUser;
     message?: TelegramMessage;
     data?: string;
-  };
+  }
 }
 
 export interface TelegramApiResponse<T> {
@@ -182,7 +182,7 @@ export interface TelegramApiResponse<T> {
   error_code?: number;
   parameters?: {
     retry_after?: number;
-  };
+  }
 }
 
 export interface TelegramFile {
@@ -209,7 +209,7 @@ export interface PaginatedResponse<T> {
     limit: number;
     total: number;
     totalPages: number;
-  };
+  }
 }
 
 export interface MediaMetadataResponse {

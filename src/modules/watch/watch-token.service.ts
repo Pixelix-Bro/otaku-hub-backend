@@ -4,8 +4,8 @@ export interface WatchTokenData {
   token: string
   tokenHash: string
   mediaId: string
-  expiresAt: Date
-  maxUses: number
+  expiresAt?: Date
+  maxUses?: number
   createdAt: Date
 }
 
@@ -15,7 +15,7 @@ export function hashWatchToken(token: string): string {
 
 export function createWatchTokenData(input: {
   mediaId: string
-  expiresAt: Date
+  expiresAt?: Date
   maxUses?: number
   createdAt?: Date
 }): WatchTokenData {
@@ -24,8 +24,8 @@ export function createWatchTokenData(input: {
     token,
     tokenHash: hashWatchToken(token),
     mediaId: input.mediaId,
-    expiresAt: input.expiresAt,
-    maxUses: input.maxUses ?? 10,
+    ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
+    ...(input.maxUses !== undefined ? { maxUses: input.maxUses } : {}),
     createdAt: input.createdAt ?? new Date(),
   }
 }
@@ -40,22 +40,25 @@ export function verifyWatchToken(token: string, tokenHash: string): boolean {
   return hashWatchToken(token) === tokenHash
 }
 
-export function isWatchTokenExpired(expiresAt: Date): boolean {
-  return Date.now() > new Date(expiresAt).getTime()
+export function isWatchTokenExpired(expiresAt?: Date): boolean {
+  return expiresAt !== undefined && Date.now() > new Date(expiresAt).getTime()
 }
 
 export function isWatchTokenUsable(tokenRecord: {
-  expiresAt: Date
-  maxUses: number
+  expiresAt?: Date
+  maxUses?: number
   usedCount: number
 }): boolean {
-  return !isWatchTokenExpired(tokenRecord.expiresAt) && tokenRecord.usedCount < tokenRecord.maxUses
+  return (
+    !isWatchTokenExpired(tokenRecord.expiresAt) &&
+    (tokenRecord.maxUses === undefined || tokenRecord.usedCount < tokenRecord.maxUses)
+  )
 }
 
 export function consumeWatchToken(tokenRecord: {
   usedCount: number
-  maxUses: number
-  expiresAt: Date
+  maxUses?: number
+  expiresAt?: Date
 }): boolean {
   if (!isWatchTokenUsable(tokenRecord)) {
     return false

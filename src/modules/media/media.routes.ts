@@ -95,11 +95,7 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(403).send({ ok: false, error: 'Media is not public' })
     }
 
-    const token = createWatchTokenData({
-      mediaId,
-      expiresAt: new Date(Date.now() + config.watchTokenTtlSeconds * 1000),
-      maxUses: config.maxWatchTokenUses,
-    })
+    const token = createWatchTokenData({ mediaId })
     await watchTokens.create({ ...token, usedCount: 0 })
 
     const publicBaseUrl = config.publicApiUrl
@@ -113,7 +109,7 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
       mediaId,
       token: token.token,
       previewUrl,
-      expiresAt: token.expiresAt.toISOString(),
+      expiresAt: null,
     })
   })
 
@@ -133,11 +129,7 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).send({ ok: false, error: 'Media not found' })
     }
 
-    const token = createWatchTokenData({
-      mediaId,
-      expiresAt: new Date(Date.now() + config.watchTokenTtlSeconds * 1000),
-      maxUses: config.maxWatchTokenUses,
-    })
+    const token = createWatchTokenData({ mediaId })
     await watchTokens.create({ ...token, usedCount: 0 })
 
     const basePreviewUrl =

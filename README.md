@@ -15,7 +15,7 @@ This repository is a Fastify + MongoDB backend. It is not a PostgreSQL project a
 
 Copy [.env.example](.env.example) and replace the placeholders with real values.
 
-Required backend variables are `BOT_TOKEN`, `TELEGRAM_STORAGE_CHAT_ID`, `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_ADMIN_IDS` (or legacy `ADMIN_TELEGRAM_IDS`), `MONGODB_URI`, and `MEDIA_LINK_SECRET`. Set `PUBLIC_API_URL` (or legacy `PUBLIC_BASE_URL`) to the backend's public HTTPS URL in production so the Telegram webhook and watch links can be configured. `ADMIN_API_TOKEN` is required only if HTTP admin routes should be enabled. `MONGODB_DB`, `WATCH_TOKEN_TTL_SECONDS`, and `MAX_WATCH_TOKEN_USES` have defaults. Set `TELEGRAM_BOT_API_BASE_URL` only when using a non-hosted Bot API endpoint; the old `TELEGRAM_API_BASE_URL` name remains supported.
+Required backend variables are `BOT_TOKEN`, `TELEGRAM_STORAGE_CHAT_ID`, `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_ADMIN_IDS` (or legacy `ADMIN_TELEGRAM_IDS`), `MONGODB_URI`, and `MEDIA_LINK_SECRET`. Set `PUBLIC_API_URL` (or legacy `PUBLIC_BASE_URL`) to the backend's public HTTPS URL in production so the Telegram webhook and watch links can be configured. `ADMIN_API_TOKEN` is required only if HTTP admin routes should be enabled. `MONGODB_DB` has a default. Watch tokens are reusable, have no expiration, and are bound to one media ID. Set `TELEGRAM_BOT_API_BASE_URL` only when using a non-hosted Bot API endpoint; the old `TELEGRAM_API_BASE_URL` name remains supported.
 
 MTProto streaming requires `TELEGRAM_MTPROTO_API_ID` and `TELEGRAM_MTPROTO_API_HASH` from `my.telegram.org`; `BOT_TOKEN` authorizes the bot session. Keep all three server-side and never expose them to browser code. `TELEGRAM_MTPROTO_SESSION` is an optional secret for persisting the MTProto auth session across restarts. Without the API ID/hash, small-file preview can fall back to the hosted Bot API, but the hosted API's `getFile` limit is 20 MiB; larger streams return HTTP 503 with setup guidance. A configured Local Bot API endpoint is also retained as a fallback, but MTProto is the direct-range reader.
 
@@ -44,7 +44,7 @@ The app exposes:
 - Health checks at `/health/live` and `/health/ready`
 - A Telegram inline admin dashboard with live DB/Bot API/storage/website checks
 - Paginated and filtered admin library, media details, statistics, monitoring, and confirmed deletion callbacks
-- Token-protected native HTML5 playback page at `/watch/:mediaId`
+- Token-protected, viewport-sized native HTML5 playback page at `/watch/:mediaId`
 - Public watch metadata routes under `/api/media` and `/v1/media`
 - Range-aware preview streaming under `/api/stream/:mediaId` and `/v1/preview/:mediaId`
 - Telegram bot webhook setup and admin validation hooks
@@ -60,7 +60,7 @@ The API service is prepared for Railway or Docker-style deployment with:
 - Optional MTProto range streaming via `TELEGRAM_MTPROTO_API_ID` and `TELEGRAM_MTPROTO_API_HASH`
 - Dockerfile for the API service
 
-The backend receives Telegram webhook JSON and copies messages server-side; it does not accept raw video uploads, so Fastify's JSON body limit is not a media-size limit. Streaming uses Node readable streams and HTTP ranges; a new browser range request can resume after an interrupted connection. It does not spool full files to backend RAM or temporary disk.
+The backend receives Telegram webhook JSON and copies messages server-side; it does not accept raw video uploads, so Fastify's JSON body limit is not a media-size limit. Streaming uses Node readable streams and HTTP ranges; a new browser range request can resume after an interrupted connection. It does not spool full files to backend RAM or temporary disk. HLS transcoding and multiple quality renditions are not currently provided; the player streams the stored original quality.
 
 If deploying behind Nginx, disable response buffering for the streaming paths and allow long reads, for example:
 

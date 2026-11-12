@@ -1,4 +1,4 @@
-import 'dotenv/config'
+import 'dotenv/config';
 
 export interface AppConfig {
   nodeEnv: string
@@ -14,8 +14,6 @@ export interface AppConfig {
   adminTelegramIds: number[]
   adminApiToken?: string
   mediaLinkSecret: string
-  watchTokenTtlSeconds: number
-  maxWatchTokenUses: number
   logLevel: string
   telegramApiBaseUrl: string
   telegramMtprotoApiId?: number
@@ -143,8 +141,6 @@ export function loadConfig(): AppConfig {
     adminTelegramIds,
     adminApiToken: optionalEnv('ADMIN_API_TOKEN', '') || undefined,
     mediaLinkSecret: requireEnv('MEDIA_LINK_SECRET'),
-    watchTokenTtlSeconds: Number(optionalEnv('WATCH_TOKEN_TTL_SECONDS', '3600')),
-    maxWatchTokenUses: Number(optionalEnv('MAX_WATCH_TOKEN_USES', '10')),
     logLevel: optionalEnv('LOG_LEVEL', 'info'),
     telegramApiBaseUrl,
     ...(telegramMtprotoApiId !== undefined ? { telegramMtprotoApiId } : {}),

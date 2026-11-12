@@ -49,11 +49,6 @@ export async function watchPageRoutes(app: FastifyInstance): Promise<void> {
     if (media.mediaType !== 'video' && !media.mimeType?.startsWith('video/')) {
       return reply.code(415).send({ ok: false, error: 'This media is not a browser video' })
     }
-    const claimedToken = await watchTokens.consumeIfUsable(tokenHash)
-    if (!claimedToken || claimedToken.mediaId !== mediaId) {
-      return reply.code(403).send({ ok: false, error: 'Watch link use limit reached or expired' })
-    }
-
     const nonce = randomBytes(18).toString('base64')
     const title = escapeHtml(media.fileName ?? media.mediaId)
     const streamUrl = `/api/stream/${encodeURIComponent(mediaId)}?token=${encodeURIComponent(token)}`
@@ -71,7 +66,7 @@ export async function watchPageRoutes(app: FastifyInstance): Promise<void> {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
   <title>${title}</title>
-  <style nonce="${nonce}">html,body{margin:0}video{display:block;width:100%;height:auto;max-height:100vh;background:#000}</style>
+  <style nonce="${nonce}">html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#000}video{display:block;width:100vw;height:100vh;height:100dvh;object-fit:contain;background:#000}</style>
 </head>
 <body>
   <video controls playsinline preload="metadata" src="${streamUrl}" aria-label="${title}"></video>

@@ -26,7 +26,6 @@ import { WatchTokenRepository } from '../watch/watch-token.repository.js'
 import {
   createWatchTokenData,
   hashWatchToken,
-  isWatchTokenUsable,
   parseWatchStartPayload,
 } from '../watch/watch-token.service.js'
 import type { DashboardView } from './bot.dashboard.js'
@@ -85,8 +84,8 @@ async function processStart(message: TelegramMessage): Promise<void> {
 
   const tokenHash = hashWatchToken(token)
   const tokenRecord = await watchTokens.findByHash(tokenHash)
-  if (!tokenRecord || !isWatchTokenUsable(tokenRecord)) {
-    await reply(message, 'Havola yaroqsiz, muddati tugagan yoki foydalanish limiti tugagan.')
+  if (!tokenRecord) {
+    await reply(message, 'Havola yaroqsiz yoki muddati tugagan.')
     return
   }
 
@@ -102,12 +101,6 @@ async function processStart(message: TelegramMessage): Promise<void> {
   }
   if (media.visibility !== 'private' && media.visibility !== 'public') {
     await reply(message, 'Media uchun kirish ruxsati mavjud emas.')
-    return
-  }
-
-  const claimedToken = await watchTokens.consumeIfUsable(tokenHash)
-  if (!claimedToken) {
-    await reply(message, 'Havola yaroqsiz, muddati tugagan yoki foydalanish limiti tugagan.')
     return
   }
 
@@ -209,8 +202,6 @@ async function processAdminUpload(message: TelegramMessage): Promise<void> {
   try {
     const token = createWatchTokenData({
       mediaId: media.mediaId,
-      expiresAt: new Date(Date.now() + config.watchTokenTtlSeconds * 1000),
-      maxUses: config.maxWatchTokenUses,
     })
     await watchTokens.create({ ...token, usedCount: 0 })
 
@@ -356,8 +347,6 @@ async function processAdminCommand(message: TelegramMessage): Promise<void> {
 
     const token = createWatchTokenData({
       mediaId: media.mediaId,
-      expiresAt: new Date(Date.now() + config.watchTokenTtlSeconds * 1000),
-      maxUses: config.maxWatchTokenUses,
     })
     await watchTokens.create({ ...token, usedCount: 0 })
     const previewUrl = buildWatchPageUrl(config.publicApiUrl, media.mediaId, token.token)
@@ -582,8 +571,6 @@ async function processCallback(update: TelegramUpdate): Promise<void> {
       }
       const token = createWatchTokenData({
         mediaId: media.mediaId,
-        expiresAt: new Date(Date.now() + config.watchTokenTtlSeconds * 1000),
-        maxUses: config.maxWatchTokenUses,
       })
       await watchTokens.create({ ...token, usedCount: 0 })
       const previewUrl = buildWatchPageUrl(config.publicApiUrl, media.mediaId, token.token)
@@ -593,7 +580,7 @@ async function processCallback(update: TelegramUpdate): Promise<void> {
       }
       await api.sendMessage(
         callback.message.chat.id,
-        `🌐 ${escapeHtml(media.fileName ?? media.mediaId)} үшін XENVO streaming link (${Math.floor(config.watchTokenTtlSeconds / 60)} daqiqa amal qiladi):`,
+        `🌐 ${escapeHtml(media.fileName ?? media.mediaId)} uchun XENVO streaming link (muddatsiz):`,
         { reply_markup: { inline_keyboard: [[{ text: '🌐 XENVO’da ochish', url: previewUrl }]] } }
       )
       return

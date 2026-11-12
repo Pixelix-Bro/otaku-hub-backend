@@ -32,6 +32,7 @@ import {
   createWatchTokenData,
   hashWatchToken,
   isWatchTokenExpired,
+  isWatchTokenUsable,
   parseWatchStartPayload,
   verifyWatchToken,
 } from '../../modules/watch/watch-token.service.js'
@@ -152,6 +153,14 @@ describe('Telegram media core', () => {
     expect(parseWatchStartPayload(`w_${tokenData.token}`)).toBe(tokenData.token)
     expect(parseWatchStartPayload(`w_${tokenData.token}!`)).toBeNull()
     expect(parseWatchStartPayload(`w_${'a'.repeat(63)}`)).toBeNull()
+  })
+
+  it('creates reusable watch tokens without an expiration or usage limit', () => {
+    const tokenData = createWatchTokenData({ mediaId: 'MED_12345678' })
+    expect(tokenData.expiresAt).toBeUndefined()
+    expect(tokenData.maxUses).toBeUndefined()
+    expect(isWatchTokenExpired(tokenData.expiresAt)).toBe(false)
+    expect(isWatchTokenUsable({ usedCount: 1000, ...tokenData })).toBe(true)
   })
 
   it('parses valid HTTP range requests and rejects invalid ones', () => {
