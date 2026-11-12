@@ -4,7 +4,7 @@ import { COLLECTIONS } from '../../config/constants.js'
 import { getConfig } from '../../config/env.js'
 import { isValidMediaId } from '../../core/utils/index.js'
 import { getDb } from '../../infrastructure/mongodb/client.js'
-import { buildPreviewUrl, buildTelegramWatchUrl } from '../preview/preview.service.js'
+import { buildWatchPageUrl, canPreviewMedia } from '../preview/preview.service.js'
 import { WatchTokenRepository } from '../watch/watch-token.repository.js'
 import { createWatchTokenData } from '../watch/watch-token.service.js'
 import { buildMediaMetadataResponse, getMediaById, listMedia } from './media.service.js'
@@ -102,17 +102,23 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
     })
     await watchTokens.create({ ...token, usedCount: 0 })
 
-    const publicBaseUrl = config.publicApiUrl || config.publicWebUrl
+    const publicBaseUrl = config.publicApiUrl
+    const workerReady = Boolean(
+      config.telegramWorkerUrl &&
+      config.telegramWorkerSecret &&
+      config.mtprotoApiId &&
+      config.mtprotoApiHash &&
+      media.mtprotoStatus === 'available'
+    )
     const previewUrl =
-      publicBaseUrl && media.sizeBytes !== null && media.sizeBytes <= config.botApiDownloadMaxBytes
-        ? `${buildPreviewUrl(publicBaseUrl, mediaId)}?token=${encodeURIComponent(token.token)}`
+      publicBaseUrl && canPreviewMedia(media.sizeBytes, config.botApiDownloadMaxBytes, workerReady)
+        ? buildWatchPageUrl(publicBaseUrl, mediaId, token.token)
         : null
 
     return reply.code(200).send({
       ok: true,
       mediaId,
       token: token.token,
-      watchUrl: buildTelegramWatchUrl(config.telegramBotUsername, token.token),
       previewUrl,
       expiresAt: token.expiresAt.toISOString(),
     })
@@ -141,20 +147,23 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
     })
     await watchTokens.create({ ...token, usedCount: 0 })
 
+    const workerReady = Boolean(
+      config.telegramWorkerUrl &&
+      config.telegramWorkerSecret &&
+      config.mtprotoApiId &&
+      config.mtprotoApiHash &&
+      media.mtprotoStatus === 'available'
+    )
     const basePreviewUrl =
       media.visibility === 'public' &&
-      media.sizeBytes !== null &&
-      media.sizeBytes <= config.botApiDownloadMaxBytes
-        ? buildPreviewUrl(config.publicApiUrl || config.publicWebUrl, mediaId)
+      canPreviewMedia(media.sizeBytes, config.botApiDownloadMaxBytes, workerReady)
+        ? buildWatchPageUrl(config.publicApiUrl || config.publicWebUrl, mediaId, token.token)
         : null
 
     return reply.code(200).send({
       ok: true,
       mediaId,
-      telegramWatchUrl: buildTelegramWatchUrl(config.telegramBotUsername, token.token),
-      webPreviewUrl: basePreviewUrl
-        ? `${basePreviewUrl}?token=${encodeURIComponent(token.token)}`
-        : null,
+      webPreviewUrl: basePreviewUrl,
     })
   })
 

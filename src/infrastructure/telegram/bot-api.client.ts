@@ -136,6 +136,20 @@ export class TelegramBotApiClient {
     })
   }
 
+  async editMessageText(
+    chatId: number | string,
+    messageId: number,
+    text: string,
+    options?: Record<string, unknown>
+  ): Promise<unknown> {
+    return this.callApi('editMessageText', {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      ...options,
+    })
+  }
+
   async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<boolean> {
     return this.callApi<boolean>('answerCallbackQuery', {
       callback_query_id: callbackQueryId,

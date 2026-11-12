@@ -6,7 +6,8 @@ import { isValidMediaId, parseRangeHeader } from '../../core/utils/index.js'
 import { getTelegramService } from '../../infrastructure/telegram/telegram.service.js'
 import { getMediaById } from '../media/media.service.js'
 import { WatchTokenRepository } from '../watch/watch-token.repository.js'
-import { hashWatchToken, isWatchTokenUsable } from '../watch/watch-token.service.js'
+import { hashWatchToken, isWatchTokenExpired } from '../watch/watch-token.service.js'
+import { buildStreamingHeaders } from './preview.service.js'
 
 const watchTokens = new WatchTokenRepository()
 
@@ -14,6 +15,7 @@ export async function previewRoutes(app: FastifyInstance): Promise<void> {
   app.route({
     method: ['GET', 'HEAD'],
     url: '/:mediaId',
+    config: { rateLimit: { max: 1200, timeWindow: '1 minute' } },
     handler: async (request, reply) => {
       const { mediaId } = request.params as { mediaId: string }
       const { token } = request.query as { token?: string }
@@ -31,7 +33,11 @@ export async function previewRoutes(app: FastifyInstance): Promise<void> {
 
       const tokenHash = hashWatchToken(token)
       const tokenRecord = await watchTokens.findByHash(tokenHash)
-      if (!tokenRecord || tokenRecord.mediaId !== mediaId || !isWatchTokenUsable(tokenRecord)) {
+      if (
+        !tokenRecord ||
+        tokenRecord.mediaId !== mediaId ||
+        isWatchTokenExpired(tokenRecord.expiresAt)
+      ) {
         return reply.code(403).send({ ok: false, error: 'Preview token is invalid or expired' })
       }
 
@@ -39,79 +45,122 @@ export async function previewRoutes(app: FastifyInstance): Promise<void> {
       if (!media || media.storageStatus !== 'stored' || media.storageMessageId === null) {
         return reply.code(404).send({ ok: false, error: 'Stored media not found' })
       }
-      if (media.sizeBytes === null || media.sizeBytes > config.botApiDownloadMaxBytes) {
-        return reply
-          .code(413)
-          .send({ ok: false, error: 'Media exceeds the configured preview limit' })
+      if (media.sizeBytes === null || media.sizeBytes <= 0) {
+        return reply.code(422).send({ ok: false, error: 'Media size is unavailable' })
       }
 
-      const claimedToken = await watchTokens.consumeIfUsable(tokenHash)
-      if (!claimedToken) {
+      const totalLength = media.sizeBytes
+      const range = parseRangeHeader(rangeHeader, totalLength)
+      if (rangeHeader && !range) {
+        reply.header('Content-Range', `bytes */${totalLength}`)
+        return reply.code(416).send({ ok: false, error: 'Invalid range request' })
+      }
+
+      const selectedRange = range ?? {
+        start: 0,
+        end: totalLength - 1,
+        length: totalLength,
+        isSuffix: false,
+      }
+      const workerUrlBase = config.telegramWorkerUrl
+      const workerSecret = config.telegramWorkerSecret
+      const useWorker =
+        Boolean(workerUrlBase && workerSecret) || totalLength > config.botApiDownloadMaxBytes
+      if (useWorker && (!workerUrlBase || !workerSecret)) {
         return reply
-          .code(403)
-          .send({ ok: false, error: 'Preview token has expired or reached its use limit' })
+          .code(503)
+          .send({ ok: false, error: 'Large-media streaming worker is not configured' })
+      }
+
+      const responseHeaders = buildStreamingHeaders({
+        mediaId: media.mediaId,
+        fileUniqueId: media.telegramFileUniqueId,
+        fileName: media.fileName,
+        mimeType: media.mimeType,
+        sizeBytes: totalLength,
+        updatedAt: media.updatedAt,
+        range,
+      })
+      const setMediaResponseHeaders = (): void => {
+        for (const [name, value] of Object.entries(responseHeaders)) {
+          reply.header(name, value)
+        }
+        if (range) reply.code(206)
+      }
+
+      if (request.method === 'HEAD') {
+        setMediaResponseHeaders()
+        return reply.send()
       }
 
       try {
-        const botApi = getTelegramService().getBotApiClient()
+        if (useWorker) {
+          if (!workerUrlBase || !workerSecret) {
+            return reply
+              .code(503)
+              .send({ ok: false, error: 'Large-media streaming worker is not configured' })
+          }
+          if (!media.storageChatId || media.storageMessageId === null) {
+            return reply
+              .code(404)
+              .send({ ok: false, error: 'Telegram storage location is unavailable' })
+          }
+          const workerUrl = new URL(`${workerUrlBase}/media-range`)
+          workerUrl.searchParams.set('chat_id', media.storageChatId)
+          workerUrl.searchParams.set('message_id', String(media.storageMessageId))
+          workerUrl.searchParams.set('offset', String(selectedRange.start))
+          workerUrl.searchParams.set('limit', String(selectedRange.length))
+          const upstream = await fetch(workerUrl, {
+            headers: { 'X-Worker-Secret': workerSecret },
+            signal: request.signal,
+          })
+          if (!upstream.ok || !upstream.body) {
+            const status = [404, 409, 416, 429, 503, 504].includes(upstream.status)
+              ? upstream.status
+              : 502
+            const error =
+              status === 404
+                ? 'Telegram source message or media is unavailable'
+                : status === 409
+                  ? 'Telegram file reference expired and must be refreshed'
+                  : status === 416
+                    ? 'Telegram rejected the requested byte range'
+                    : status === 429
+                      ? 'Telegram rate limit reached; retry after the indicated delay'
+                      : status === 503
+                        ? 'MTProto worker is unavailable or at capacity'
+                        : status === 504
+                          ? 'Telegram media request timed out'
+                          : 'MTProto worker could not fetch the requested media range'
+            return reply.code(status).send({
+              ok: false,
+              error,
+            })
+          }
+          setMediaResponseHeaders()
+          return reply.send(Readable.from(upstream.body as unknown as AsyncIterable<Uint8Array>))
+        }
+
         if (!media.telegramFileId) {
           return reply.code(404).send({ ok: false, error: 'Telegram file metadata is unavailable' })
         }
-
+        const botApi = getTelegramService().getBotApiClient()
         const telegramFile = await botApi.getFile(media.telegramFileId)
         if (!telegramFile.file_path) {
           return reply.code(502).send({ ok: false, error: 'Telegram did not provide a file path' })
         }
-        if (
-          telegramFile.file_size !== undefined &&
-          telegramFile.file_size > config.botApiDownloadMaxBytes
-        ) {
-          return reply
-            .code(413)
-            .send({ ok: false, error: 'Telegram file exceeds the configured preview limit' })
-        }
-
-        const totalLength = telegramFile.file_size ?? media.sizeBytes ?? 0
-        const range = parseRangeHeader(rangeHeader, totalLength)
-        if (rangeHeader && !range) {
-          return reply.code(416).send({ ok: false, error: 'Invalid range request' })
-        }
-
-        const upstream = await fetch(botApi.getFileUrl(telegramFile.file_path))
+        const upstream = await fetch(botApi.getFileUrl(telegramFile.file_path), {
+          signal: request.signal,
+        })
         if (!upstream.ok || !upstream.body) {
           return reply.code(502).send({ ok: false, error: 'Telegram file stream is unavailable' })
         }
-
-        const contentType = media.mimeType ?? upstream.headers.get('content-type')
-        reply.header(
-          'Content-Type',
-          contentType && /^[\w!#$&^_.+-]+\/[\w!#$&^_.+-]+$/.test(contentType)
-            ? contentType
-            : 'application/octet-stream'
-        )
-        reply.header('Cache-Control', 'private, no-store')
-        reply.header('Referrer-Policy', 'no-referrer')
-        reply.header('Accept-Ranges', 'bytes')
-
-        if (range) {
-          reply.code(206)
-          reply.header('Content-Range', `bytes ${range.start}-${range.end}/${totalLength}`)
-          reply.header('Content-Length', String(range.length))
-        } else {
-          reply.header('Content-Length', String(totalLength))
+        setMediaResponseHeaders()
+        if (!range) {
+          return reply.send(Readable.from(upstream.body as unknown as AsyncIterable<Uint8Array>))
         }
-
-        if (request.method === 'HEAD') {
-          return reply.send()
-        }
-
-        if (range) {
-          const data = Buffer.from(await upstream.arrayBuffer())
-          const chunk = data.subarray(range.start, range.end + 1)
-          return reply.send(chunk)
-        }
-
-        return reply.send(Readable.from(upstream.body as unknown as AsyncIterable<Uint8Array>))
+        const data = Buffer.from(await upstream.arrayBuffer())
+        return reply.send(data.subarray(selectedRange.start, selectedRange.end + 1))
       } catch {
         return reply.code(502).send({ ok: false, error: 'Telegram preview request failed' })
       }

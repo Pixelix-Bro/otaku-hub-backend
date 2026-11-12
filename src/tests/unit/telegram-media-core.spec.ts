@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
 import { formatFileSize, parseRangeHeader } from '../../core/utils/index.js'
-import { isAdminTelegramId, parseAdminTelegramIds } from '../../modules/admin/admin.service.js'
+import {
+  isAdminTelegramId,
+  isValidAdminApiToken,
+  parseAdminTelegramIds,
+} from '../../modules/admin/admin.service.js'
 import {
   detectMediaType,
   generateMediaId,
@@ -10,7 +14,13 @@ import {
   isSupportedTelegramMediaMessage,
 } from '../../modules/media/media-id.js'
 import { buildMediaMetadataResponse } from '../../modules/media/media.service.js'
-import { canPreviewPublicly } from '../../modules/preview/preview.service.js'
+import {
+  buildStreamingHeaders,
+  buildWatchPageUrl,
+  canPreviewMedia,
+  canPreviewPublicly,
+} from '../../modules/preview/preview.service.js'
+import { callbackData, escapeHtml } from '../../modules/telegram-bot/bot.dashboard.js'
 import { buildStoredMediaMessage } from '../../modules/telegram-bot/bot.messages.js'
 import {
   createWatchTokenData,
@@ -63,6 +73,19 @@ describe('Telegram media core', () => {
     expect(isAdminTelegramId(123456789, [123456789, 987654321])).toBe(true)
     expect(isAdminTelegramId(111, [123456789, 987654321])).toBe(false)
     expect(parseAdminTelegramIds('123,456,789')).toEqual([123, 456, 789])
+  })
+
+  it('requires a bearer token for HTTP admin authorization', () => {
+    expect(isValidAdminApiToken('Bearer secure-admin-token', 'secure-admin-token')).toBe(true)
+    expect(isValidAdminApiToken('Bearer wrong-token', 'secure-admin-token')).toBe(false)
+    expect(isValidAdminApiToken('secure-admin-token', 'secure-admin-token')).toBe(false)
+    expect(isValidAdminApiToken('Bearer secure-admin-token', undefined)).toBe(false)
+  })
+
+  it('validates callback_data by UTF-8 bytes and escapes dynamic HTML', () => {
+    expect(callbackData('a'.repeat(64))).toBe('a'.repeat(64))
+    expect(() => callbackData('é'.repeat(33))).toThrow(/64 bytes/)
+    expect(escapeHtml(`<x a="'">&`)).toBe('&lt;x a=&quot;&#39;&quot;&gt;&amp;')
   })
 
   it('formats file sizes using the 1024-based rule', () => {
@@ -122,6 +145,52 @@ describe('Telegram media core', () => {
     expect(canPreviewPublicly(null, 2048)).toBe(false)
   })
 
+  it('allows large previews only when the MTProto worker is configured', () => {
+    expect(canPreviewMedia(null, 20 * 1024 * 1024, true)).toBe(false)
+    expect(canPreviewMedia(10 * 1024 * 1024, 20 * 1024 * 1024, false)).toBe(true)
+    expect(canPreviewMedia(399 * 1024 * 1024, 20 * 1024 * 1024, false)).toBe(false)
+    expect(canPreviewMedia(399 * 1024 * 1024, 20 * 1024 * 1024, true)).toBe(true)
+  })
+
+  it('builds the canonical backend watch-page URL with an encoded bearer token', () => {
+    expect(buildWatchPageUrl('https://api.example.com/', 'MED_12345678', 'token_abc')).toBe(
+      'https://api.example.com/watch/MED_12345678?token=token_abc'
+    )
+    expect(buildWatchPageUrl('', 'MED_12345678', 'token_abc')).toBeNull()
+  })
+
+  it('builds exact range response headers and sanitizes unsafe metadata', () => {
+    const headers = buildStreamingHeaders({
+      mediaId: 'MED_12345678',
+      fileUniqueId: 'unique-file',
+      fileName: 'episode 01.mp4',
+      mimeType: 'video/mp4',
+      sizeBytes: 10_000_000,
+      updatedAt: new Date(0),
+      range: { start: 1048576, end: 2097151, length: 1048576, isSuffix: false },
+    })
+
+    expect(headers['Accept-Ranges']).toBe('bytes')
+    expect(headers['Content-Length']).toBe('1048576')
+    expect(headers['Content-Range']).toBe('bytes 1048576-2097151/10000000')
+    expect(headers['Content-Type']).toBe('video/mp4')
+    expect(headers['Content-Disposition']).toContain('inline;')
+    expect(headers['ETag']).toMatch(/^"[A-Za-z0-9_-]+"$/)
+
+    const unsafe = buildStreamingHeaders({
+      mediaId: 'MED_12345678',
+      fileUniqueId: null,
+      fileName: 'clip.mp4\r\nX-Injected: yes',
+      mimeType: 'video/mp4\r\nX-Injected: yes',
+      sizeBytes: 100,
+      updatedAt: new Date(0),
+      range: null,
+    })
+    expect(unsafe['Content-Type']).toBe('application/octet-stream')
+    expect(unsafe['Content-Disposition']).not.toContain('\r')
+    expect(unsafe['Content-Disposition']).not.toContain('\n')
+  })
+
   it('does not expose Telegram or storage identifiers in public metadata', () => {
     const metadata = buildMediaMetadataResponse({
       mediaId: 'MED_12345678',
@@ -164,18 +233,17 @@ describe('Telegram media core', () => {
       formatLabel: 'MP4',
       durationLabel: '24:18',
       resolutionLabel: '1920 × 1080',
-      watchUrl: 'https://t.me/BOT_USERNAME?start=w_RANDOM_TOKEN',
-      webPreviewUrl: 'https://api.example.com/v1/preview/MED_8F72A91C?token=WEB_PREVIEW_TOKEN',
+      webPreviewUrl: 'https://api.example.com/watch/MED_8F72A91C?token=WEB_PREVIEW_TOKEN',
     })
 
-    expect(message).toContain('🎬 VIDEO MUVAFFAQIYATLI SAQLANDI!')
+    expect(message).toContain('🎬 VIDEO XENVO STREAMING’GA TAYYOR!')
     expect(message).toContain('📁 Fayl nomi: anime-episode-01.mp4')
     expect(message).toContain('🆔 Media ID: MED_8F72A91C')
     expect(message).toContain('📦 Hajmi: 1.50 GB')
     expect(message).toContain('📐 Resolution: 1920 × 1080')
     expect(message).toContain(
-      '🌐 Web Preview: https://api.example.com/v1/preview/MED_8F72A91C?token=WEB_PREVIEW_TOKEN'
+      '🔗 XENVO’da tomosha qilish: https://api.example.com/watch/MED_8F72A91C?token=WEB_PREVIEW_TOKEN'
     )
-    expect(message).toContain('https://t.me/BOT_USERNAME?start=w_RANDOM_TOKEN')
+    expect(message).not.toContain('https://t.me/')
   })
 })

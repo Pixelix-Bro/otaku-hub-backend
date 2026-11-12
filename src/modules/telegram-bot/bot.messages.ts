@@ -11,7 +11,6 @@ export function buildStoredMediaMessage(input: {
   formatLabel: string | null
   durationLabel: string | null
   resolutionLabel: string | null
-  watchUrl: string
   webPreviewUrl?: string | null
 }) {
   const emojiByType: Record<string, string> = {
@@ -40,8 +39,11 @@ export function buildStoredMediaMessage(input: {
   const emoji = emojiByType[mediaType] ?? '📦'
   const typeLabel = labelByType[mediaType] ?? String(input.mediaType).toUpperCase()
   const fileName = input.fileName ?? 'Mavjud emas'
+  const streamingReady = Boolean(input.webPreviewUrl)
   const lines = [
-    `${emoji} ${typeLabel} MUVAFFAQIYATLI SAQLANDI!`,
+    streamingReady
+      ? `${emoji} ${typeLabel} XENVO STREAMING’GA TAYYOR!`
+      : `${emoji} ${typeLabel} TELEGRAM’DA SAQLANDI, STREAMING TASDIQLANMAGAN`,
     '',
     `📁 Fayl nomi: ${fileName}`,
     `🆔 Media ID: ${input.mediaId}`,
@@ -62,17 +64,13 @@ export function buildStoredMediaMessage(input: {
   }
 
   lines.push('☁️ Storage: Telegram Cloud')
-  lines.push('📍 Status: STORED')
+  lines.push('📍 Storage: STORED')
+  lines.push(`🌐 Website streaming: ${streamingReady ? 'READY' : 'NOT VERIFIED'}`)
   lines.push(
-    input.webPreviewUrl ? `🌐 Web Preview: ${input.webPreviewUrl}` : '🌐 Web Preview: Mavjud emas'
+    input.webPreviewUrl
+      ? `🔗 XENVO’da tomosha qilish: ${input.webPreviewUrl}`
+      : '🔗 Web preview: Mavjud emas'
   )
-  lines.push('')
-
-  if (mediaType === 'document') {
-    lines.push(`🔗 Telegram orqali ochish: ${input.watchUrl}`)
-  } else {
-    lines.push(`🔗 Telegram orqali tomosha qilish: ${input.watchUrl}`)
-  }
 
   return lines.join('\n')
 }

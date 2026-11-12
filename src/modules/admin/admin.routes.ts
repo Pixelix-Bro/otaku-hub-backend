@@ -5,8 +5,13 @@ import { getConfig } from '../../config/env.js'
 import { isValidMediaId } from '../../core/utils/index.js'
 import { getDb } from '../../infrastructure/mongodb/client.js'
 import { getMediaById, setMediaVisibility, softDeleteMedia } from '../media/media.service.js'
+import { isValidAdminApiToken } from './admin.service.js'
 
 function requireAdmin(request: FastifyRequest): number | null {
+  const config = getConfig()
+  if (!isValidAdminApiToken(request.headers.authorization, config.adminApiToken)) {
+    return null
+  }
   const raw = request.headers['x-telegram-user-id']
   if (typeof raw !== 'string') {
     return null
@@ -60,49 +65,11 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     if (userId === null || !config.adminTelegramIds.includes(userId)) {
       return reply.code(403).send({ ok: false, error: 'Forbidden' })
     }
-
-    const body = request.body as {
-      mediaType?: string
-      fileName?: string
-      mimeType?: string
-      sizeBytes?: number
-      visibility?: 'public' | 'private'
-      caption?: string
-    }
-
-    if (!body.fileName) {
-      return reply.code(400).send({ ok: false, error: 'fileName is required' })
-    }
-
-    const db = getDb()
-    const media = db.collection(COLLECTIONS.MEDIA)
-    const mediaId = `MED_${Math.random().toString(16).slice(2, 10).toUpperCase()}`
-    const created = {
-      mediaId,
-      mediaType: body.mediaType ?? 'document',
-      fileName: body.fileName,
-      mimeType: body.mimeType ?? 'application/octet-stream',
-      extension: body.fileName.split('.').pop()?.toLowerCase() ?? null,
-      sizeBytes: body.sizeBytes ?? 0,
-      telegramFileId: null,
-      telegramFileUniqueId: null,
-      sourceChatId: 'admin',
-      sourceMessageId: 0,
-      storageChatId: config.telegramStorageChatId || 'unknown',
-      storageMessageId: null,
-      mediaGroupId: null,
-      caption: body.caption ?? null,
-      durationSeconds: null,
-      width: null,
-      height: null,
-      visibility: body.visibility ?? 'private',
-      storageStatus: 'stored',
-      createdAt: new Date(),
-      updatedAt: new Date(),
-      deletedAt: null,
-    }
-    await media.insertOne(created)
-    return reply.code(201).send({ ok: true, data: created })
+    return reply.code(405).send({
+      ok: false,
+      error:
+        'Media must be uploaded through the authorized Telegram bot; metadata-only creation is disabled.',
+    })
   })
 
   app.patch('/media/:mediaId', async (request, reply) => {

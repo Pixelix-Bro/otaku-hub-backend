@@ -6,6 +6,7 @@ import { telegramWebhookPlugin } from '../infrastructure/telegram/webhook.js'
 import { adminRoutes } from '../modules/admin/admin.routes.js'
 import { mediaRoutes } from '../modules/media/media.routes.js'
 import { previewRoutes } from '../modules/preview/preview.routes.js'
+import { watchPageRoutes } from '../modules/preview/watch-page.routes.js'
 import { processTelegramUpdate } from '../modules/telegram-bot/update.processor.js'
 
 export async function registerServerRoutes(app: FastifyInstance): Promise<void> {
@@ -19,6 +20,7 @@ export async function registerServerRoutes(app: FastifyInstance): Promise<void> 
   app.register(adminRoutes, { prefix: '/api/admin' })
   app.register(previewRoutes, { prefix: '/v1/preview' })
   app.register(previewRoutes, { prefix: '/api/stream' })
+  app.register(watchPageRoutes)
 
   await app.register(telegramWebhookPlugin, {
     onUpdate: async (update) => {

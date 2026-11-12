@@ -7,6 +7,7 @@ import { getConfig } from '../config/env.js'
 import { logger } from '../infrastructure/logger/logger.js'
 import { connectMongoDB, isMongoDBHealthy } from '../infrastructure/mongodb/client.js'
 import { createAllIndexes } from '../infrastructure/mongodb/indexes.js'
+import { MtprotoWorkerClient } from '../infrastructure/telegram/mtproto-worker.client.js'
 import { getTelegramService } from '../infrastructure/telegram/telegram.service.js'
 import { registerServerRoutes } from './server.js'
 
@@ -22,6 +23,7 @@ export async function bootstrap(): Promise<ReturnType<typeof Fastify>> {
 
   await app.register(helmet, {
     global: true,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
   })
 
   await app.register(cors, {
@@ -31,7 +33,15 @@ export async function bootstrap(): Promise<ReturnType<typeof Fastify>> {
         ? /^https?:\/\/localhost(?::\d+)?$/
         : false,
     credentials: true,
-    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'HEAD', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type', 'Range'],
+    exposedHeaders: [
+      'Accept-Ranges',
+      'Content-Disposition',
+      'Content-Length',
+      'Content-Range',
+      'ETag',
+    ],
   })
 
   await app.register(rateLimit, {
@@ -44,22 +54,32 @@ export async function bootstrap(): Promise<ReturnType<typeof Fastify>> {
   await registerServerRoutes(app)
 
   app.get('/health/live', async () => ({ ok: true, status: 'live' }))
-  app.get('/health/ready', async () => {
+  app.get('/health/ready', async (_, reply) => {
     const mongoHealthy = await isMongoDBHealthy()
-    const ready = startupReady && mongoHealthy
-    return {
+    const workerReady = await new MtprotoWorkerClient(
+      config.telegramWorkerUrl!,
+      config.telegramWorkerSecret!
+    ).isReady()
+    const ready = startupReady && mongoHealthy && workerReady
+    return reply.code(ready ? 200 : 503).send({
       ok: ready,
       status: ready ? 'ready' : 'not_ready',
       mongo: mongoHealthy,
-    }
+      mtprotoWorker: workerReady,
+    })
   })
   app.get('/health', async (_, reply) => {
     const mongoHealthy = await isMongoDBHealthy()
-    const ready = startupReady && mongoHealthy
+    const workerReady = await new MtprotoWorkerClient(
+      config.telegramWorkerUrl!,
+      config.telegramWorkerSecret!
+    ).isReady()
+    const ready = startupReady && mongoHealthy && workerReady
     return reply.code(ready ? 200 : 503).send({
       ok: ready,
       status: ready ? 'ok' : 'degraded',
       mongo: mongoHealthy,
+      mtprotoWorker: workerReady,
       env: config.nodeEnv,
     })
   })

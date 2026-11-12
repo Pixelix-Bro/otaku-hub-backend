@@ -3,9 +3,16 @@ import { getConfig } from '../../config/env.js'
 import { TelegramApiError } from '../../core/errors/app-error.js'
 import type { TelegramMessage, TelegramUpdate } from '../../core/types/index.js'
 import { formatDuration, formatFileSize } from '../../core/utils/index.js'
+import { logger } from '../../infrastructure/logger/logger.js'
 import { getCollection } from '../../infrastructure/mongodb/client.js'
+import { MtprotoWorkerClient } from '../../infrastructure/telegram/mtproto-worker.client.js'
 import { getTelegramService } from '../../infrastructure/telegram/telegram.service.js'
+import {
+  consumeDeleteConfirmation,
+  createDeleteConfirmation,
+} from '../admin/admin-action.repository.js'
 import { isAdminTelegramId } from '../admin/admin.service.js'
+import { recordAdminAudit } from '../admin/audit.repository.js'
 import { getTelegramMediaMetadata, isSupportedTelegramMediaMessage } from '../media/media-id.js'
 import {
   createMediaRecord,
@@ -15,7 +22,7 @@ import {
   softDeleteMedia,
   updateMediaStorage,
 } from '../media/media.service.js'
-import { buildPreviewUrl, buildTelegramWatchUrl } from '../preview/preview.service.js'
+import { buildWatchPageUrl, canPreviewMedia } from '../preview/preview.service.js'
 import { WatchTokenRepository } from '../watch/watch-token.repository.js'
 import {
   createWatchTokenData,
@@ -23,6 +30,18 @@ import {
   isWatchTokenUsable,
   parseWatchStartPayload,
 } from '../watch/watch-token.service.js'
+import type { DashboardView } from './bot.dashboard.js'
+import {
+  callbackData,
+  renderDashboard,
+  renderHelp,
+  renderLibrary,
+  renderMediaDetails,
+  renderMonitor,
+  renderSettings,
+  renderStatistics,
+  renderUploadPrompt,
+} from './bot.dashboard.js'
 import { buildStoredMediaMessage } from './bot.messages.js'
 
 const watchTokens = new WatchTokenRepository()
@@ -42,11 +61,26 @@ async function processStart(message: TelegramMessage): Promise<void> {
   const payload = message.text?.trim().split(/\s+/, 2)[1]
   const token = parseWatchStartPayload(payload)
   if (!token) {
-    const welcome =
-      userId && isAdminTelegramId(userId, config.adminTelegramIds)
-        ? 'Bot tayyor. Fayl yuboring yoki /help yuboring.'
-        : 'Salom! Media havolasini ochish uchun Watch tugmasidan foydalaning.'
-    await reply(message, welcome)
+    if (!isAdminTelegramId(userId, config.adminTelegramIds)) {
+      await recordAdminAudit({
+        eventType: 'admin.access_denied',
+        adminTelegramId: userId,
+        result: 'denied',
+      })
+      await reply(message, '⛔ Sizda administrator ruxsati mavjud emas.')
+      return
+    }
+    await recordAdminAudit({
+      eventType: 'admin.dashboard_opened',
+      adminTelegramId: userId,
+      result: 'success',
+    })
+    const dashboard = await renderDashboard()
+    await getTelegramService().getBotApiClient().sendMessage(message.chat.id, dashboard.text, {
+      parse_mode: 'HTML',
+      reply_markup: dashboard.reply_markup,
+      disable_web_page_preview: true,
+    })
     return
   }
 
@@ -93,6 +127,13 @@ async function processAdminUpload(message: TelegramMessage): Promise<void> {
   const api = getTelegramService().getBotApiClient()
 
   if (!userId || !isAdminTelegramId(userId, config.adminTelegramIds)) {
+    if (userId) {
+      await recordAdminAudit({
+        eventType: 'media.upload_denied',
+        adminTelegramId: userId,
+        result: 'denied',
+      })
+    }
     await reply(message, '⛔ Sizda admin ruxsati mavjud emas.')
     return
   }
@@ -135,6 +176,12 @@ async function processAdminUpload(message: TelegramMessage): Promise<void> {
     storageMessageId = result.storageMessageId
   } catch (error) {
     await updateMediaStorage(media.mediaId, { storageStatus: 'copy_unknown' })
+    await recordAdminAudit({
+      eventType: 'media.upload_failed',
+      adminTelegramId: userId,
+      mediaId: media.mediaId,
+      result: 'failure',
+    })
     await reply(
       message,
       'Media nusxasi holati noma’lum. Duplicate nusxa yaratilmasligi uchun qayta yuborilmadi; reconcile talab qilinadi.'
@@ -142,9 +189,37 @@ async function processAdminUpload(message: TelegramMessage): Promise<void> {
     throw error
   }
 
+  const workerConfigured = Boolean(
+    config.telegramWorkerUrl &&
+    config.telegramWorkerSecret &&
+    config.mtprotoApiId &&
+    config.mtprotoApiHash
+  )
+  let mtprotoInfo: Awaited<ReturnType<MtprotoWorkerClient['getMediaInfo']>> | null = null
+  if (workerConfigured && config.telegramWorkerUrl && config.telegramWorkerSecret) {
+    try {
+      mtprotoInfo = await new MtprotoWorkerClient(
+        config.telegramWorkerUrl,
+        config.telegramWorkerSecret
+      ).getMediaInfo(config.telegramStorageChatId, storageMessageId)
+    } catch {
+      logger.warn({ mediaId: media.mediaId }, 'MTProto could not resolve uploaded storage media')
+    }
+  }
+
   const stored = await updateMediaStorage(media.mediaId, {
     storageStatus: 'stored',
     storageMessageId,
+    ...(mtprotoInfo
+      ? {
+          sizeBytes: mtprotoInfo.file_size,
+          mtprotoDocumentId: mtprotoInfo.document_id,
+          mtprotoAccessHash: mtprotoInfo.access_hash,
+          mtprotoDcId: mtprotoInfo.dc_id,
+          mtprotoFileReference: mtprotoInfo.file_reference,
+          mtprotoStatus: 'available' as const,
+        }
+      : { mtprotoStatus: workerConfigured ? ('unavailable' as const) : ('unconfigured' as const) }),
   })
   if (!stored) {
     await reply(
@@ -153,6 +228,12 @@ async function processAdminUpload(message: TelegramMessage): Promise<void> {
     )
     return
   }
+  await recordAdminAudit({
+    eventType: 'media.upload_stored',
+    adminTelegramId: userId,
+    mediaId: media.mediaId,
+    result: 'success',
+  })
 
   try {
     const token = createWatchTokenData({
@@ -162,11 +243,11 @@ async function processAdminUpload(message: TelegramMessage): Promise<void> {
     })
     await watchTokens.create({ ...token, usedCount: 0 })
 
+    const workerReady = mtprotoInfo !== null
     const webPreviewUrl =
-      metadata.sizeBytes !== null &&
-      metadata.sizeBytes <= config.botApiDownloadMaxBytes &&
+      canPreviewMedia(metadata.sizeBytes, config.botApiDownloadMaxBytes, workerReady) &&
       config.publicApiUrl
-        ? `${buildPreviewUrl(config.publicApiUrl, media.mediaId)}?token=${encodeURIComponent(token.token)}`
+        ? buildWatchPageUrl(config.publicApiUrl, media.mediaId, token.token)
         : null
 
     await api.sendMessage(
@@ -182,7 +263,6 @@ async function processAdminUpload(message: TelegramMessage): Promise<void> {
           metadata.durationSeconds === null ? null : formatDuration(metadata.durationSeconds),
         resolutionLabel:
           metadata.width && metadata.height ? `${metadata.width} × ${metadata.height}` : null,
-        watchUrl: buildTelegramWatchUrl(config.telegramBotUsername, token.token),
         webPreviewUrl,
       })
     )
@@ -203,6 +283,13 @@ async function processAdminCommand(message: TelegramMessage): Promise<void> {
   const command = rawCommand?.split('@')[0]?.toLowerCase()
 
   if (!userId || !isAdminTelegramId(userId, config.adminTelegramIds)) {
+    if (userId) {
+      await recordAdminAudit({
+        eventType: 'admin.command_denied',
+        adminTelegramId: userId,
+        result: 'denied',
+      })
+    }
     await reply(message, '⛔ Sizda admin ruxsati mavjud emas.')
     return
   }
@@ -288,10 +375,46 @@ async function processAdminCommand(message: TelegramMessage): Promise<void> {
       await reply(message, 'Stored media topilmadi. Foydalanish: /preview MEDIA_ID')
       return
     }
-    if (media.sizeBytes === null || media.sizeBytes > config.botApiDownloadMaxBytes) {
+    const workerConfigured = Boolean(
+      config.telegramWorkerUrl &&
+      config.telegramWorkerSecret &&
+      config.mtprotoApiId &&
+      config.mtprotoApiHash
+    )
+    let previewSize = media.sizeBytes
+    let largeFileWorkerReady = media.mtprotoStatus === 'available'
+    if (
+      previewSize !== null &&
+      previewSize > config.botApiDownloadMaxBytes &&
+      !largeFileWorkerReady &&
+      workerConfigured &&
+      config.telegramWorkerUrl &&
+      config.telegramWorkerSecret
+    ) {
+      try {
+        const info = await new MtprotoWorkerClient(
+          config.telegramWorkerUrl,
+          config.telegramWorkerSecret
+        ).getMediaInfo(media.storageChatId, media.storageMessageId)
+        await updateMediaStorage(media.mediaId, {
+          storageStatus: 'stored',
+          sizeBytes: info.file_size,
+          mtprotoDocumentId: info.document_id,
+          mtprotoAccessHash: info.access_hash,
+          mtprotoDcId: info.dc_id,
+          mtprotoFileReference: info.file_reference,
+          mtprotoStatus: 'available',
+        })
+        previewSize = info.file_size
+        largeFileWorkerReady = true
+      } catch {
+        largeFileWorkerReady = false
+      }
+    }
+    if (!canPreviewMedia(previewSize, config.botApiDownloadMaxBytes, largeFileWorkerReady)) {
       await reply(
         message,
-        `Web preview faqat ${formatFileSize(config.botApiDownloadMaxBytes)} gacha ishlaydi; bu media Telegram Bot API preview limitidan katta yoki hajmi noma’lum.`
+        `Web preview faqat ${formatFileSize(config.botApiDownloadMaxBytes)} gacha, yoki MTProto worker sozlangan bo‘lsa katta fayllarda ishlaydi. Bu media hajmi noma’lum yoki worker sozlanmagan.`
       )
       return
     }
@@ -306,7 +429,11 @@ async function processAdminCommand(message: TelegramMessage): Promise<void> {
       maxUses: config.maxWatchTokenUses,
     })
     await watchTokens.create({ ...token, usedCount: 0 })
-    const previewUrl = `${buildPreviewUrl(config.publicApiUrl, media.mediaId)}?token=${encodeURIComponent(token.token)}`
+    const previewUrl = buildWatchPageUrl(config.publicApiUrl, media.mediaId, token.token)
+    if (!previewUrl) {
+      await reply(message, 'Watch URL yaratilmadi: PUBLIC_API_URL sozlanmagan.')
+      return
+    }
     await reply(message, `🌐 Web Preview: ${previewUrl}`)
     return
   }
@@ -318,6 +445,12 @@ async function processAdminCommand(message: TelegramMessage): Promise<void> {
       return
     }
     const changed = await setMediaVisibility(mediaId, visibility)
+    await recordAdminAudit({
+      eventType: 'media.visibility_changed',
+      adminTelegramId: userId,
+      mediaId,
+      result: changed ? 'success' : 'failure',
+    })
     await reply(
       message,
       changed ? `Media ${mediaId} visibility=${visibility}.` : 'Stored media topilmadi.'
@@ -331,15 +464,17 @@ async function processAdminCommand(message: TelegramMessage): Promise<void> {
       await reply(message, 'Stored media topilmadi. Foydalanish: /delete MEDIA_ID')
       return
     }
+    const confirmation = await createDeleteConfirmation(media.mediaId, userId)
     await api.sendMessage(
       message.chat.id,
-      `Media ${media.mediaId} ni o'chirishni tasdiqlaysizmi?`,
+      `⚠️ <b>MEDIA’NI O‘CHIRISH</b>\n\nHaqiqatan ham <b>${escapeHtml(media.fileName ?? media.mediaId)}</b> ni XENVO storage’dan o‘chirmoqchimisiz?\n\nAsl upload xabari Telegram’da o‘chirilmaydi.`,
       {
+        parse_mode: 'HTML',
         reply_markup: {
           inline_keyboard: [
             [
-              { text: 'Tasdiqlash', callback_data: `del_confirm:${media.mediaId}` },
-              { text: 'Bekor qilish', callback_data: 'del_cancel' },
+              { text: '🗑 Ha, o‘chirish', callback_data: callbackData(`delete:${confirmation}`) },
+              { text: '❌ Bekor qilish', callback_data: 'delete:cancel' },
             ],
           ],
         },
@@ -368,6 +503,11 @@ async function processCallback(update: TelegramUpdate): Promise<void> {
   const config = getConfig()
   const api = getTelegramService().getBotApiClient()
   if (!isAdminTelegramId(callback.from.id, config.adminTelegramIds)) {
+    await recordAdminAudit({
+      eventType: 'admin.callback_denied',
+      adminTelegramId: callback.from.id,
+      result: 'denied',
+    })
     await api.answerCallbackQuery(callback.id, '⛔ Sizda admin ruxsati mavjud emas.')
     return
   }
@@ -379,32 +519,233 @@ async function processCallback(update: TelegramUpdate): Promise<void> {
     await api.answerCallbackQuery(callback.id, 'Private chatda tasdiqlang.')
     return
   }
-  if (callback.data === 'del_cancel') {
-    await api.answerCallbackQuery(callback.id, 'Bekor qilindi.')
+  const data = callback.data ?? ''
+  if (Buffer.byteLength(data, 'utf8') > 64) {
+    await api.answerCallbackQuery(callback.id, 'Amal kodi noto‘g‘ri.')
     return
   }
-  const match = /^del_confirm:(MED_[0-9A-F]{8})$/.exec(callback.data ?? '')
-  if (!match) {
-    await api.answerCallbackQuery(callback.id, 'Noma’lum amal.')
-    return
+  await api.answerCallbackQuery(callback.id)
+
+  const showView = async (view: {
+    text: DashboardView['text']
+    reply_markup: DashboardView['reply_markup']
+  }): Promise<void> => {
+    try {
+      await api.editMessageText(
+        callback.message!.chat.id,
+        callback.message!.message_id,
+        view.text,
+        {
+          parse_mode: 'HTML',
+          reply_markup: view.reply_markup,
+          disable_web_page_preview: true,
+        }
+      )
+    } catch {
+      await api.sendMessage(callback.message!.chat.id, view.text, {
+        parse_mode: 'HTML',
+        reply_markup: view.reply_markup,
+        disable_web_page_preview: true,
+      })
+    }
   }
-  const media = await getMediaById(match[1])
-  if (!media || media.storageStatus !== 'stored' || media.storageMessageId === null) {
-    await api.answerCallbackQuery(callback.id, 'Media topilmadi yoki saqlanmagan.')
-    return
-  }
-  const deleted = await getTelegramService()
-    .getStorageChannel()
-    .deleteStorageMessage(media.storageMessageId)
-  if (!deleted) {
-    await api.answerCallbackQuery(
-      callback.id,
-      'Telegram xabarini o‘chirish muvaffaqiyatsiz tugadi.'
+
+  try {
+    if (data === 'menu:home') return showView(await renderDashboard())
+    if (data === 'menu:upload') return showView(renderUploadPrompt())
+    if (data === 'menu:stats') return showView(await renderStatistics())
+    if (data === 'menu:monitor') return showView(await renderMonitor())
+    if (data === 'menu:help') return showView(renderHelp())
+    if (data === 'menu:settings') return showView(renderSettings())
+    if (data === 'library:search') {
+      await api.sendMessage(
+        callback.message.chat.id,
+        '🔎 <b>MEDIA QIDIRISH</b>\n\nQidirish uchun <code>/search QUERY</code> yuboring. Media ID yoki fayl nomi bilan izlash mumkin.',
+        { parse_mode: 'HTML' }
+      )
+      return
+    }
+
+    const libraryMatch =
+      /^library:(\d{1,6}):(all|video|photo|audio|document|processing|failed|public|private)$/.exec(
+        data
+      )
+    if (libraryMatch) {
+      return showView(await renderLibrary(Number(libraryMatch[1]), libraryMatch[2]))
+    }
+
+    const mediaMatch = /^media:(detail|delete|preview|publish|unpublish):(MED_[0-9A-F]{8})$/.exec(
+      data
     )
-    return
+    if (mediaMatch?.[1] === 'detail') {
+      const media = await getMediaById(mediaMatch[2])
+      if (!media) {
+        await api.sendMessage(callback.message.chat.id, 'Media topilmadi yoki o‘chirilgan.')
+        return
+      }
+      return showView(renderMediaDetails(media))
+    }
+
+    if (mediaMatch?.[1] === 'publish' || mediaMatch?.[1] === 'unpublish') {
+      const visibility = mediaMatch[1] === 'publish' ? 'public' : 'private'
+      const changed = await setMediaVisibility(mediaMatch[2], visibility)
+      const media = changed ? await getMediaById(mediaMatch[2]) : null
+      if (!media) {
+        await api.sendMessage(
+          callback.message.chat.id,
+          'Саqlangan media topilmadi ёки status ўзгармади.'
+        )
+        return
+      }
+      await recordAdminAudit({
+        eventType: 'media.visibility_changed',
+        adminTelegramId: callback.from.id,
+        mediaId: media.mediaId,
+        result: 'success',
+      })
+      return showView(renderMediaDetails(media))
+    }
+
+    if (mediaMatch?.[1] === 'delete') {
+      const media = await getMediaById(mediaMatch[2])
+      if (!media || media.storageStatus !== 'stored' || media.storageMessageId === null) {
+        await api.sendMessage(callback.message.chat.id, 'Saqlangan media topilmadi.')
+        return
+      }
+      const confirmation = await createDeleteConfirmation(media.mediaId, callback.from.id)
+      await api.editMessageText(
+        callback.message.chat.id,
+        callback.message.message_id,
+        `⚠️ <b>MEDIA’NI O‘CHIRISH</b>\n\n${escapeHtml(media.fileName ?? media.mediaId)}\n\nStorage nusxasi o‘chiriladi. Asl upload xabari Telegram’da qoladi.`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '🗑 Tasdiqlash', callback_data: callbackData(`delete:${confirmation}`) },
+                { text: '❌ Bekor qilish', callback_data: 'delete:cancel' },
+              ],
+            ],
+          },
+        }
+      )
+      return
+    }
+
+    if (mediaMatch?.[1] === 'preview') {
+      const media = await getMediaById(mediaMatch[2])
+      if (!media || media.storageStatus !== 'stored' || media.storageMessageId === null) {
+        await api.sendMessage(callback.message.chat.id, 'Saqlangan media topilmadi.')
+        return
+      }
+      const workerReady = Boolean(
+        media.mtprotoStatus === 'available' &&
+        config.telegramWorkerUrl &&
+        config.telegramWorkerSecret
+      )
+      if (!canPreviewMedia(media.sizeBytes, config.botApiDownloadMaxBytes, workerReady)) {
+        await api.sendMessage(
+          callback.message.chat.id,
+          'Streaming uchun media yoki MTProto holati tayyor emas.'
+        )
+        return
+      }
+      if (!config.publicApiUrl) {
+        await api.sendMessage(callback.message.chat.id, 'PUBLIC_API_URL sozlanmagan.')
+        return
+      }
+      const token = createWatchTokenData({
+        mediaId: media.mediaId,
+        expiresAt: new Date(Date.now() + config.watchTokenTtlSeconds * 1000),
+        maxUses: config.maxWatchTokenUses,
+      })
+      await watchTokens.create({ ...token, usedCount: 0 })
+      const previewUrl = buildWatchPageUrl(config.publicApiUrl, media.mediaId, token.token)
+      if (!previewUrl) {
+        await api.sendMessage(callback.message.chat.id, 'Watch URL yaratilmadi.')
+        return
+      }
+      await api.sendMessage(
+        callback.message.chat.id,
+        `🌐 ${escapeHtml(media.fileName ?? media.mediaId)} үшін XENVO streaming link (${Math.floor(config.watchTokenTtlSeconds / 60)} daqiqa amal qiladi):`,
+        { reply_markup: { inline_keyboard: [[{ text: '🌐 XENVO’da ochish', url: previewUrl }]] } }
+      )
+      return
+    }
+
+    if (data === 'delete:cancel') {
+      await api.editMessageText(
+        callback.message.chat.id,
+        callback.message.message_id,
+        'O‘chirish bekor qilindi.',
+        {
+          reply_markup: {
+            inline_keyboard: [[{ text: '🏠 Asosiy menyu', callback_data: 'menu:home' }]],
+          },
+        }
+      )
+      return
+    }
+
+    const deleteMatch = /^delete:([A-Za-z0-9_-]{20,30})$/.exec(data)
+    if (!deleteMatch) {
+      await api.sendMessage(callback.message.chat.id, 'Amal yaroqsiz yoki muddati tugagan.')
+      return
+    }
+    const mediaId = await consumeDeleteConfirmation(deleteMatch[1], callback.from.id)
+    if (!mediaId) {
+      await api.sendMessage(
+        callback.message.chat.id,
+        'Tasdiqlash muddati tugagan yoki amal bajarilgan.'
+      )
+      return
+    }
+    const media = await getMediaById(mediaId)
+    if (!media || media.storageStatus !== 'stored' || media.storageMessageId === null) {
+      await api.sendMessage(callback.message.chat.id, 'Media topilmadi ёки саqlanmagan.')
+      return
+    }
+    const deleted = await getTelegramService()
+      .getStorageChannel()
+      .deleteStorageMessage(media.storageMessageId)
+    if (!deleted) {
+      await recordAdminAudit({
+        eventType: 'media.delete_failed',
+        adminTelegramId: callback.from.id,
+        mediaId,
+        result: 'failure',
+      })
+      await api.sendMessage(
+        callback.message.chat.id,
+        'Storage nusxasini Telegram’dan o‘chirib bo‘lmadi.'
+      )
+      return
+    }
+    await softDeleteMedia(media.mediaId)
+    await recordAdminAudit({
+      eventType: 'media.deleted',
+      adminTelegramId: callback.from.id,
+      mediaId: media.mediaId,
+      result: 'success',
+    })
+    await api.editMessageText(
+      callback.message.chat.id,
+      callback.message.message_id,
+      `✅ <b>${escapeHtml(media.fileName ?? media.mediaId)}</b> XENVO’dan o‘chirildi. Asl upload xabari Telegram’da qoldi.`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [[{ text: '🏠 Asosiy menyu', callback_data: 'menu:home' }]],
+        },
+      }
+    )
+  } catch (error) {
+    logger.error({ adminTelegramId: callback.from.id, error }, 'Admin callback failed')
+    await api.sendMessage(
+      callback.message.chat.id,
+      'Amal bajarilmadi. Holatni tekshirib qayta urinib ko‘ring.'
+    )
   }
-  await softDeleteMedia(media.mediaId)
-  await api.answerCallbackQuery(callback.id, 'Media o‘chirildi.')
 }
 
 function escapeRegExp(value: string): string {

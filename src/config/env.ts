@@ -12,6 +12,7 @@ export interface AppConfig {
   telegramStorageChatId: string
   telegramWebhookSecret: string
   adminTelegramIds: number[]
+  adminApiToken?: string
   mediaLinkSecret: string
   botApiDownloadMaxBytes: number
   watchTokenTtlSeconds: number
@@ -20,6 +21,7 @@ export interface AppConfig {
   mtprotoApiId?: number
   mtprotoApiHash?: string
   telegramSessionPath?: string
+  telegramWorkerUrl?: string
   telegramWorkerSecret?: string
   streamChunkBytes: number
   maxActiveStreams: number
@@ -64,9 +66,9 @@ export function loadConfig(): AppConfig {
   )
   const publicWebUrl = optionalEnv('PUBLIC_WEB_URL', '').replace(/\/+$/, '')
 
-  const storageChatId = optionalEnv('TELEGRAM_STORAGE_CHAT_ID', '')
-  if (storageChatId && !/^-?\d+$/.test(storageChatId)) {
-    throw new Error('❌ TELEGRAM_STORAGE_CHAT_ID must be a numeric Telegram chat ID when set.')
+  const storageChatId = requireEnv('TELEGRAM_STORAGE_CHAT_ID')
+  if (!/^-?\d+$/.test(storageChatId)) {
+    throw new Error('❌ TELEGRAM_STORAGE_CHAT_ID must be a numeric Telegram chat ID.')
   }
 
   const adminIdsRaw = firstAvailableEnv('TELEGRAM_ADMIN_IDS', 'ADMIN_TELEGRAM_IDS')
@@ -90,13 +92,34 @@ export function loadConfig(): AppConfig {
     throw new Error('❌ BOT_API_DOWNLOAD_MAX_BYTES must be a positive integer below 20 MiB.')
   }
 
-  const mtprotoApiIdRaw = optionalEnv('API_ID', '')
-  const mtprotoApiId = mtprotoApiIdRaw ? Number(mtprotoApiIdRaw) : undefined
-  const mtprotoApiHash = optionalEnv('API_HASH', '') || undefined
+  const mtprotoApiId = Number(requireEnv('API_ID'))
+  if (!Number.isSafeInteger(mtprotoApiId) || mtprotoApiId <= 0) {
+    throw new Error('API_ID must be a positive integer.')
+  }
+  const mtprotoApiHash = requireEnv('API_HASH')
+  const telegramWorkerUrl = requireEnv('TELEGRAM_WORKER_URL').replace(/\/+$/, '')
+  let parsedWorkerUrl: URL
+  try {
+    parsedWorkerUrl = new URL(telegramWorkerUrl)
+  } catch {
+    throw new Error('TELEGRAM_WORKER_URL must be an absolute HTTP(S) URL.')
+  }
+  if (parsedWorkerUrl.protocol !== 'http:' && parsedWorkerUrl.protocol !== 'https:') {
+    throw new Error('TELEGRAM_WORKER_URL must use HTTP or HTTPS.')
+  }
+  const telegramWorkerSecret = requireEnv('TELEGRAM_WORKER_SECRET')
 
   const streamChunkBytes = Number(optionalEnv('STREAM_CHUNK_BYTES', '524288'))
   const maxActiveStreams = Number(optionalEnv('MAX_ACTIVE_STREAMS', '10'))
   const maxPartsPerMedia = Number(optionalEnv('MAX_PARTS_PER_MEDIA', '1000'))
+  if (
+    !Number.isSafeInteger(streamChunkBytes) ||
+    streamChunkBytes < 4096 ||
+    streamChunkBytes > 524288 ||
+    streamChunkBytes % 4096 !== 0
+  ) {
+    throw new Error('STREAM_CHUNK_BYTES must be a 4 KiB multiple between 4096 and 524288.')
+  }
 
   return {
     nodeEnv: optionalEnv('NODE_ENV', 'production'),
@@ -110,17 +133,18 @@ export function loadConfig(): AppConfig {
     telegramStorageChatId: storageChatId,
     telegramWebhookSecret: requireEnv('TELEGRAM_WEBHOOK_SECRET'),
     adminTelegramIds,
+    adminApiToken: optionalEnv('ADMIN_API_TOKEN', '') || undefined,
     mediaLinkSecret: requireEnv('MEDIA_LINK_SECRET'),
     botApiDownloadMaxBytes,
-    watchTokenTtlSeconds: Number(optionalEnv('WATCH_TOKEN_TTL_SECONDS', '604800')),
+    watchTokenTtlSeconds: Number(optionalEnv('WATCH_TOKEN_TTL_SECONDS', '3600')),
     maxWatchTokenUses: Number(optionalEnv('MAX_WATCH_TOKEN_USES', '10')),
     logLevel: optionalEnv('LOG_LEVEL', 'info'),
-    mtprotoApiId: Number.isInteger(mtprotoApiId) && mtprotoApiId! > 0 ? mtprotoApiId : undefined,
+    mtprotoApiId,
     mtprotoApiHash,
     telegramSessionPath: optionalEnv('TELEGRAM_SESSION_PATH', '/data/xenvo_mtproto.session'),
-    telegramWorkerSecret: optionalEnv('TELEGRAM_WORKER_SECRET', ''),
-    streamChunkBytes:
-      Number.isFinite(streamChunkBytes) && streamChunkBytes > 0 ? streamChunkBytes : 524288,
+    telegramWorkerUrl,
+    telegramWorkerSecret,
+    streamChunkBytes,
     maxActiveStreams:
       Number.isFinite(maxActiveStreams) && maxActiveStreams > 0 ? maxActiveStreams : 10,
     maxPartsPerMedia:
