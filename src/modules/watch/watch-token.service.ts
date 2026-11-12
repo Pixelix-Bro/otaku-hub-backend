@@ -19,7 +19,7 @@ export function createWatchTokenData(input: {
   maxUses?: number
   createdAt?: Date
 }): WatchTokenData {
-  const token = randomBytes(24).toString('base64url')
+  const token = randomBytes(32).toString('base64url')
   return {
     token,
     tokenHash: hashWatchToken(token),

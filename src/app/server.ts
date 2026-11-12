@@ -14,8 +14,11 @@ export async function registerServerRoutes(app: FastifyInstance): Promise<void> 
   app.get('/ping', async () => ({ ok: true, name: 'otaku-hub-backend' }))
 
   app.register(mediaRoutes, { prefix: '/v1/media' })
+  app.register(mediaRoutes, { prefix: '/api/media' })
   app.register(adminRoutes, { prefix: '/v1/admin' })
+  app.register(adminRoutes, { prefix: '/api/admin' })
   app.register(previewRoutes, { prefix: '/v1/preview' })
+  app.register(previewRoutes, { prefix: '/api/stream' })
 
   await app.register(telegramWebhookPlugin, {
     onUpdate: async (update) => {

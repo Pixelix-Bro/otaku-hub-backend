@@ -15,7 +15,7 @@ import {
   softDeleteMedia,
   updateMediaStorage,
 } from '../media/media.service.js'
-import { buildTelegramWatchUrl } from '../preview/preview.service.js'
+import { buildPreviewUrl, buildTelegramWatchUrl } from '../preview/preview.service.js'
 import { WatchTokenRepository } from '../watch/watch-token.repository.js'
 import {
   createWatchTokenData,
@@ -162,6 +162,14 @@ async function processAdminUpload(message: TelegramMessage): Promise<void> {
     })
     await watchTokens.create({ ...token, usedCount: 0 })
 
+    const webPreviewUrl =
+      media.visibility === 'public' &&
+      metadata.sizeBytes !== null &&
+      metadata.sizeBytes <= config.botApiDownloadMaxBytes &&
+      config.publicApiUrl
+        ? `${buildPreviewUrl(config.publicApiUrl, media.mediaId)}?token=${encodeURIComponent(token.token)}`
+        : null
+
     await api.sendMessage(
       message.chat.id,
       buildStoredMediaMessage({
@@ -176,6 +184,7 @@ async function processAdminUpload(message: TelegramMessage): Promise<void> {
         resolutionLabel:
           metadata.width && metadata.height ? `${metadata.width} × ${metadata.height}` : null,
         watchUrl: buildTelegramWatchUrl(config.telegramBotUsername, token.token),
+        webPreviewUrl,
       })
     )
   } catch (error) {

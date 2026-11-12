@@ -12,6 +12,7 @@ export function buildStoredMediaMessage(input: {
   durationLabel: string | null
   resolutionLabel: string | null
   watchUrl: string
+  webPreviewUrl?: string | null
 }) {
   const emojiByType: Record<string, string> = {
     video: '🎬',
@@ -62,7 +63,9 @@ export function buildStoredMediaMessage(input: {
 
   lines.push('☁️ Storage: Telegram Cloud')
   lines.push('📍 Status: STORED')
-  lines.push('🌐 Web Preview: Mavjud emas')
+  lines.push(
+    input.webPreviewUrl ? `🌐 Web Preview: ${input.webPreviewUrl}` : '🌐 Web Preview: Mavjud emas'
+  )
   lines.push('')
 
   if (mediaType === 'document') {

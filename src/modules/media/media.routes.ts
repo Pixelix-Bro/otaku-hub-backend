@@ -79,6 +79,45 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
     return { ok: true, data: buildMediaMetadataResponse(item) }
   })
 
+  app.post('/:mediaId/watch-token', async (request, reply) => {
+    const config = getConfig()
+    const { mediaId } = request.params as { mediaId: string }
+
+    if (!isValidMediaId(mediaId)) {
+      return reply.code(400).send({ ok: false, error: 'Invalid media ID' })
+    }
+
+    const media = await getMediaById(mediaId)
+    if (!media || media.storageStatus !== 'stored' || media.storageMessageId === null) {
+      return reply.code(404).send({ ok: false, error: 'Stored media not found' })
+    }
+    if (media.visibility !== 'public') {
+      return reply.code(403).send({ ok: false, error: 'Media is not public' })
+    }
+
+    const token = createWatchTokenData({
+      mediaId,
+      expiresAt: new Date(Date.now() + config.watchTokenTtlSeconds * 1000),
+      maxUses: config.maxWatchTokenUses,
+    })
+    await watchTokens.create({ ...token, usedCount: 0 })
+
+    const publicBaseUrl = config.publicApiUrl || config.publicWebUrl
+    const previewUrl =
+      publicBaseUrl && media.sizeBytes !== null && media.sizeBytes <= config.botApiDownloadMaxBytes
+        ? `${buildPreviewUrl(publicBaseUrl, mediaId)}?token=${encodeURIComponent(token.token)}`
+        : null
+
+    return reply.code(200).send({
+      ok: true,
+      mediaId,
+      token: token.token,
+      watchUrl: buildTelegramWatchUrl(config.telegramBotUsername, token.token),
+      previewUrl,
+      expiresAt: token.expiresAt.toISOString(),
+    })
+  })
+
   app.get('/:mediaId/watch-link', async (request, reply) => {
     const config = getConfig()
     const { mediaId } = request.params as { mediaId: string }
@@ -106,7 +145,7 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
       media.visibility === 'public' &&
       media.sizeBytes !== null &&
       media.sizeBytes <= config.botApiDownloadMaxBytes
-        ? buildPreviewUrl(config.publicApiUrl, mediaId)
+        ? buildPreviewUrl(config.publicApiUrl || config.publicWebUrl, mediaId)
         : null
 
     return reply.code(200).send({
@@ -127,6 +166,13 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
     }
     if (!token) return reply.code(401).send({ ok: false, error: 'Preview token required' })
     return reply.code(307).redirect(`/v1/preview/${mediaId}?token=${encodeURIComponent(token)}`)
+  })
+
+  app.get('/:mediaId/stream', async (request, reply) => {
+    const { mediaId } = request.params as { mediaId: string }
+    const { token } = request.query as { token?: string }
+    if (!token) return reply.code(401).send({ ok: false, error: 'Watch token required' })
+    return reply.code(307).redirect(`/api/stream/${mediaId}?token=${encodeURIComponent(token)}`)
   })
 
   app.delete('/:mediaId', async (request, reply) => {

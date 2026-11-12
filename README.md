@@ -1,46 +1,77 @@
-# Telegram-Only Media Storage Backend
+# XENVO Media Backend
 
-This project implements the Telegram-first media storage architecture described in the production specification.
+This repository implements the XENVO server-side media architecture with Telegram-first storage, HTTP range streaming, and secure watch links. It remains compatible with the existing Fastify + MongoDB setup while adding the XENVO contract used for production-grade media streaming.
 
 ## Core principles
 
-- Official hosted Telegram Bot API only
-- No MTProto, API_ID, API_HASH, or user sessions
-- MongoDB stores metadata only; binary media stays in Telegram Cloud
-- Media is copied server-side with `copyMessage`
-- Large media is delivered through Telegram watch links rather than direct file downloads
-- Railway is used for backend deployment, with health checks and environment validation
+- Telegram Bot API is used for bot webhooks and bot admin flow.
+- MTProto credentials are allowed for the dedicated worker and range-based file retrieval.
+- MongoDB stores metadata, message IDs, admin records, and token state.
+- Binary media remains in Telegram cloud storage and is not copied into a hidden storage channel.
+- The public API exposes watch-token-protected media access, not raw Telegram file links.
+- Streaming uses HTTP range semantics and 206 partial responses.
 
-## Required environment variables
+## Environment contract
 
-Copy [.env.example](.env.example) and fill in the real values:
+Copy [.env.example](.env.example) and replace the placeholders with real values.
 
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_BOT_USERNAME`
-- `TELEGRAM_STORAGE_CHAT_ID`
+Required variables include:
+
+- `BOT_TOKEN`
+- `API_ID`
+- `API_HASH`
 - `TELEGRAM_WEBHOOK_SECRET`
-- `ADMIN_TELEGRAM_IDS`
-- `MEDIA_LINK_SECRET`
+- `TELEGRAM_ADMIN_IDS`
 - `MONGODB_URI`
-- `PUBLIC_API_URL`
-- `PUBLIC_WEB_URL`
+- `MONGODB_DB`
+- `MEDIA_LINK_SECRET`
+- `PUBLIC_BASE_URL`
+- `WATCH_TOKEN_TTL_SECONDS`
+- `MAX_WATCH_TOKEN_USES`
+- `STREAM_CHUNK_BYTES`
+
+Legacy keys remain accepted for backward compatibility, including `TELEGRAM_BOT_TOKEN` and `ADMIN_TELEGRAM_IDS`.
 
 ## Local development
 
 ```bash
 npm install
 npm run build
-npx vitest run
+npm test
 ```
 
-## Production deployment
+## Runtime behavior
 
-The repository is set up for Railway deployment with Docker and health endpoints:
+The app exposes:
 
-- health checks at `/health/live` and `/health/ready`
-- environment validation at startup
-- graceful shutdown support
+- Health checks at `/health/live` and `/health/ready`
+- Public watch metadata routes under `/api/media` and `/v1/media`
+- Range-aware preview streaming under `/api/stream/:mediaId` and `/v1/preview/:mediaId`
+- Telegram bot webhook setup and admin validation hooks
+
+## MTProto worker
+
+A proof-of-concept worker is available under [workers/mtproto_worker.py](workers/mtproto_worker.py). It uses Telethon with bot auth and can serve byte-range fetches via the `client.iter_download` flow for Telegram media objects.
+
+Install the worker dependencies:
+
+```bash
+cd workers
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+## Deployment
+
+The repository is prepared for Railway or Docker-style deployment with:
+
+- Fastify server runtime
+- MongoDB health checks
+- health endpoints
+- persistent session path for Telethon when configured
+- Dockerfile for the API service
 
 ## Notes
 
-This backend scaffold is designed around the allowed Telegram-only pattern. Real bot credentials and a live storage channel are required for a complete production deployment.
+This codebase intentionally keeps an operational boundary between Telegram storage and the public streaming gateway. The backend never exposes raw Telegram file URLs, file IDs, or storage chat metadata to the public API.

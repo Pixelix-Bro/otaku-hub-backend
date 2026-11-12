@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatFileSize } from '../../core/utils/index.js'
+import { formatFileSize, parseRangeHeader } from '../../core/utils/index.js'
 import { isAdminTelegramId, parseAdminTelegramIds } from '../../modules/admin/admin.service.js'
 import {
   detectMediaType,
@@ -87,9 +87,33 @@ describe('Telegram media core', () => {
     expect(verifyWatchToken(tokenData.token, tokenData.tokenHash)).toBe(true)
     expect(isWatchTokenExpired(tokenData.expiresAt)).toBe(false)
     expect(tokenData.token).toMatch(/^[A-Za-z0-9_-]+$/)
+    expect(Buffer.from(tokenData.token, 'base64url').length).toBeGreaterThanOrEqual(32)
     expect(parseWatchStartPayload(`w_${tokenData.token}`)).toBe(tokenData.token)
     expect(parseWatchStartPayload(`w_${tokenData.token}!`)).toBeNull()
     expect(parseWatchStartPayload(`w_${'a'.repeat(63)}`)).toBeNull()
+  })
+
+  it('parses valid HTTP range requests and rejects invalid ones', () => {
+    expect(parseRangeHeader('bytes=0-1048575', 10 * 1024 * 1024)).toEqual({
+      start: 0,
+      end: 1048575,
+      length: 1048576,
+      isSuffix: false,
+    })
+    expect(parseRangeHeader('bytes=10485760-20971519', 50 * 1024 * 1024)).toEqual({
+      start: 10485760,
+      end: 20971519,
+      length: 10485760,
+      isSuffix: false,
+    })
+    expect(parseRangeHeader('bytes=-512000', 1_000_000)).toEqual({
+      start: 488000,
+      end: 999999,
+      length: 512000,
+      isSuffix: true,
+    })
+    expect(parseRangeHeader('bytes=999999-1000000', 1_000_000)).toBeNull()
+    expect(parseRangeHeader('bytes=abc', 1_000_000)).toBeNull()
   })
 
   it('only allows web preview when a known size fits the configured cap', () => {
@@ -141,6 +165,7 @@ describe('Telegram media core', () => {
       durationLabel: '24:18',
       resolutionLabel: '1920 × 1080',
       watchUrl: 'https://t.me/BOT_USERNAME?start=w_RANDOM_TOKEN',
+      webPreviewUrl: 'https://api.example.com/v1/preview/MED_8F72A91C?token=WEB_PREVIEW_TOKEN',
     })
 
     expect(message).toContain('🎬 VIDEO MUVAFFAQIYATLI SAQLANDI!')
@@ -148,7 +173,9 @@ describe('Telegram media core', () => {
     expect(message).toContain('🆔 Media ID: MED_8F72A91C')
     expect(message).toContain('📦 Hajmi: 1.50 GB')
     expect(message).toContain('📐 Resolution: 1920 × 1080')
-    expect(message).toContain('🌐 Web Preview: Mavjud emas')
+    expect(message).toContain(
+      '🌐 Web Preview: https://api.example.com/v1/preview/MED_8F72A91C?token=WEB_PREVIEW_TOKEN'
+    )
     expect(message).toContain('https://t.me/BOT_USERNAME?start=w_RANDOM_TOKEN')
   })
 })
