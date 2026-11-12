@@ -61,17 +61,26 @@ export class MtprotoWorkerClient {
   }
 
   async probeReadiness(): Promise<WorkerReadiness> {
-    try {
-      const response = await fetch(`${this.baseUrl.replace(/\/+$/, '')}/ready`, {
-        headers: { 'X-Worker-Secret': this.secret },
-        signal: AbortSignal.timeout(3_000),
-      })
-      if (response.ok) return { status: 'ready' }
-      if (response.status === 403) return { status: 'unauthorized', httpStatus: 403 }
-      if (response.status === 404) return { status: 'not_found', httpStatus: 404 }
-      return { status: 'http_error', httpStatus: response.status }
-    } catch {
-      return { status: 'unreachable' }
+    const candidates = [
+      `${this.baseUrl.replace(/\/+$/, '')}/readyz`,
+      `${this.baseUrl.replace(/\/+$/, '')}/ready`,
+    ]
+
+    for (const url of candidates) {
+      try {
+        const response = await fetch(url, {
+          headers: { 'X-Worker-Secret': this.secret },
+          signal: AbortSignal.timeout(3_000),
+        })
+        if (response.ok) return { status: 'ready' }
+        if (response.status === 403) return { status: 'unauthorized', httpStatus: 403 }
+        if (response.status === 404) continue
+        return { status: 'http_error', httpStatus: response.status }
+      } catch {
+        continue
+      }
     }
+
+    return { status: 'unreachable' }
   }
 }

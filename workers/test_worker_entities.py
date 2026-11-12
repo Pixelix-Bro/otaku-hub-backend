@@ -1,7 +1,22 @@
+import os
 import unittest
 from types import SimpleNamespace
 
+from mtproto_worker import resolve_bot_token, worker_ready_endpoint_names
 from worker_entities import find_dialog_entity
+
+
+class WorkerConfigTests(unittest.TestCase):
+    def test_prefers_telegram_bot_token_when_present(self) -> None:
+        self.assertEqual(
+            resolve_bot_token({'TELEGRAM_BOT_TOKEN': 'abc:token', 'BOT_TOKEN': 'legacy:token'}),
+            'abc:token',
+        )
+
+    def test_exposes_health_and_ready_alias_endpoints(self) -> None:
+        endpoints = worker_ready_endpoint_names()
+        self.assertIn('/healthz', endpoints)
+        self.assertIn('/readyz', endpoints)
 
 
 class WorkerEntityTests(unittest.TestCase):

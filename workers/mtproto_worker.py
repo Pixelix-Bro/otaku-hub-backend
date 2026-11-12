@@ -11,9 +11,19 @@ from chunk_cache import ChunkCache
 from range_math import align_download_window, slice_download_chunk
 from worker_entities import find_dialog_entity
 
+
+def resolve_bot_token(env: dict[str, str] | None = None) -> str:
+    values = os.environ if env is None else env
+    return (values.get('TELEGRAM_BOT_TOKEN') or values.get('BOT_TOKEN') or '').strip()
+
+
+def worker_ready_endpoint_names() -> tuple[str, ...]:
+    return ('/healthz', '/health', '/readyz', '/ready')
+
+
 API_ID = int(os.getenv('API_ID', '0') or 0)
 API_HASH = os.getenv('API_HASH', '')
-BOT_TOKEN = os.getenv('BOT_TOKEN', '')
+BOT_TOKEN = resolve_bot_token()
 SESSION_PATH = os.getenv('TELEGRAM_SESSION_PATH', '/data/xenvo_mtproto.session')
 WORKER_SECRET = os.getenv('TELEGRAM_WORKER_SECRET', '')
 STORAGE_CHAT_ID = int(os.getenv('TELEGRAM_STORAGE_CHAT_ID', '0') or 0)
@@ -73,11 +83,22 @@ async def resolve_storage_entity(chat_id: int) -> object:
 
 
 @app.get('/health')
+@app.get('/healthz')
 async def health() -> dict[str, object]:
-    return {'ok': True, 'status': 'healthy'}
+    return {
+        'status': 'healthy',
+        'service': 'xenvo-mtproto-worker',
+        'telegram': {
+            'connected': client is not None and client.is_connected(),
+            'authorized': client is not None,
+        },
+        'storage': {'accessible': storage_entity is not None},
+        'streaming': {'enabled': True},
+    }
 
 
 @app.get('/ready')
+@app.get('/readyz')
 async def ready(
     x_worker_secret: str | None = Header(default=None, alias='X-Worker-Secret'),
 ) -> dict[str, object]:
@@ -85,7 +106,18 @@ async def ready(
         raise HTTPException(status_code=403, detail='invalid-worker-secret')
     if client is None:
         raise HTTPException(status_code=503, detail='worker-not-ready')
-    return {'ok': True, 'status': 'ready', 'bot_id': (await client.get_me()).id}
+    me = await client.get_me()
+    return {
+        'status': 'ready',
+        'service': 'xenvo-mtproto-worker',
+        'telegram': {
+            'connected': client.is_connected(),
+            'authorized': True,
+        },
+        'storage': {'accessible': storage_entity is not None},
+        'streaming': {'enabled': True},
+        'bot_id': me.id,
+    }
 
 
 @app.get('/media-info')
