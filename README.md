@@ -15,27 +15,15 @@ This repository is a Fastify + MongoDB backend. It is not a PostgreSQL project a
 
 Copy [.env.example](.env.example) and replace the placeholders with real values.
 
-Required variables include:
+Required backend variables are `BOT_TOKEN`, `TELEGRAM_STORAGE_CHAT_ID`, `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_ADMIN_IDS` (or legacy `ADMIN_TELEGRAM_IDS`), `MONGODB_URI`, and `MEDIA_LINK_SECRET`. Set `PUBLIC_API_URL` (or legacy `PUBLIC_BASE_URL`) to the backend's public HTTPS URL in production so the Telegram webhook and watch links can be configured. `ADMIN_API_TOKEN` is required only if HTTP admin routes should be enabled. `MONGODB_DB`, `WATCH_TOKEN_TTL_SECONDS`, `MAX_WATCH_TOKEN_USES`, and `BOT_API_DOWNLOAD_MAX_BYTES` have defaults.
 
-- `BOT_TOKEN`
-- `TELEGRAM_STORAGE_CHAT_ID`
-- `TELEGRAM_WEBHOOK_SECRET`
-- `TELEGRAM_ADMIN_IDS`
-- `ADMIN_API_TOKEN` for HTTP admin routes (required to enable them)
-- `MONGODB_URI`
-- `MONGODB_DB`
-- `MEDIA_LINK_SECRET`
-- `PUBLIC_BASE_URL`
-- `WATCH_TOKEN_TTL_SECONDS`
-- `MAX_WATCH_TOKEN_USES`
-- `STREAM_CHUNK_BYTES`
-- `MEDIA_CHUNK_CACHE_BYTES`
+Worker-only variables such as `API_ID`, `API_HASH`, `TELEGRAM_SESSION_PATH`, `STREAM_CHUNK_BYTES`, `MEDIA_CHUNK_CACHE_BYTES`, and `MAX_ACTIVE_STREAMS` are documented in the MTProto worker section. The backend only needs `TELEGRAM_WORKER_URL` and `TELEGRAM_WORKER_SECRET` together.
 
 Legacy keys remain accepted for backward compatibility, including `TELEGRAM_BOT_TOKEN` and `ADMIN_TELEGRAM_IDS`.
 
 ## Local development
 
-Set the required bot/backend variables in `.env`. MTProto is an optional all-or-none group: set `API_ID`, `API_HASH`, `TELEGRAM_WORKER_URL`, and `TELEGRAM_WORKER_SECRET` together to enable worker streaming. Without them the bot and small Bot API previews can run, but large-file streaming stays unavailable and readiness reports the worker offline. When enabling it locally, use `http://127.0.0.1:8000` and the same secret for API and worker.
+Set the required bot/backend variables in `.env`. MTProto is optional: the backend needs `TELEGRAM_WORKER_URL` and `TELEGRAM_WORKER_SECRET` together. `API_ID` and `API_HASH` belong only to the worker service. Without the backend URL/secret pair, the bot and small Bot API previews can run, but large-file streaming stays unavailable. Locally, use `http://127.0.0.1:8000` and the same worker secret in both processes.
 
 ```bash
 npm install
@@ -45,7 +33,7 @@ npm test
 
 ```bash
 pip install -r workers/requirements.txt
-uvicorn mtproto_worker:app --app-dir workers --host 127.0.0.1 --port 8000
+PORT=8000 uvicorn mtproto_worker:app --app-dir workers --host 127.0.0.1 --port 8000
 ```
 
 ```bash
@@ -72,10 +60,10 @@ For local development, install the worker dependencies and run:
 
 ```bash
 pip install -r workers/requirements.txt
-uvicorn mtproto_worker:app --app-dir workers --host 127.0.0.1 --port 8000
+PORT=8000 uvicorn mtproto_worker:app --app-dir workers --host 127.0.0.1 --port 8000
 ```
 
-For Railway, create a second service from this repository and set its Dockerfile path to `workers/Dockerfile`. Add a persistent volume mounted at `/data`, and configure `API_ID`, `API_HASH`, `BOT_TOKEN`, `TELEGRAM_STORAGE_CHAT_ID`, `TELEGRAM_WORKER_SECRET`, and `TELEGRAM_SESSION_PATH=/data/xenvo_mtproto.session` on that service. The bot must have access to that private storage chat. Configure the API service with the worker's private URL as `TELEGRAM_WORKER_URL` and the same `TELEGRAM_WORKER_SECRET`. The worker resolves and checks the storage chat before reporting ready.
+For Railway, create a second service from this repository and set its Dockerfile path to `workers/Dockerfile`. Add a persistent volume mounted at `/data`, and configure `API_ID`, `API_HASH`, `BOT_TOKEN`, `TELEGRAM_STORAGE_CHAT_ID`, `TELEGRAM_WORKER_SECRET`, `TELEGRAM_SESSION_PATH=/data/xenvo_mtproto.session`, and `PORT=8000` on that worker service. The bot must have access to that private storage chat. Configure the API service with the worker's exact private URL as `TELEGRAM_WORKER_URL` and the same `TELEGRAM_WORKER_SECRET`; `API_ID` and `API_HASH` are not needed by the backend. The worker resolves and checks the storage chat before reporting ready.
 
 The Bot API fallback is limited to `BOT_API_DOWNLOAD_MAX_BYTES` (default: under 20 MiB). Do not increase this value to bypass Telegram's hosted Bot API download limit. With the MTProto worker configured, preview ranges are fetched in aligned chunks and a bounded LRU cache is used. The native player is a backend-served page, not a separate website application. Metadata editing, durable retry jobs, configurable settings, and a formal processing queue are not implemented. No 399.58 MB, 1 GB, 2 GB, or 3 GB live Telegram playback test has been performed; Telegram source upload, bot authorization, network, proxy timeouts, worker limits, and codecs still determine actual support.
 

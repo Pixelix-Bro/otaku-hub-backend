@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { Readable } from 'node:stream'
 
 import { getConfig } from '../../config/env.js'
-import { isValidMediaId, parseRangeHeader } from '../../core/utils/index.js'
+import { isMultipartRangeHeader, isValidMediaId, parseRangeHeader } from '../../core/utils/index.js'
 import { getTelegramService } from '../../infrastructure/telegram/telegram.service.js'
 import { getMediaById } from '../media/media.service.js'
 import { WatchTokenRepository } from '../watch/watch-token.repository.js'
@@ -50,8 +50,9 @@ export async function previewRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const totalLength = media.sizeBytes
-      const range = parseRangeHeader(rangeHeader, totalLength)
-      if (rangeHeader && !range) {
+      const multipartRange = isMultipartRangeHeader(rangeHeader)
+      const range = multipartRange ? null : parseRangeHeader(rangeHeader, totalLength)
+      if (rangeHeader && !range && !multipartRange) {
         reply.header('Content-Range', `bytes */${totalLength}`)
         return reply.code(416).send({ ok: false, error: 'Invalid range request' })
       }
@@ -64,8 +65,7 @@ export async function previewRoutes(app: FastifyInstance): Promise<void> {
       }
       const workerUrlBase = config.telegramWorkerUrl
       const workerSecret = config.telegramWorkerSecret
-      const useWorker =
-        Boolean(workerUrlBase && workerSecret) || totalLength > config.botApiDownloadMaxBytes
+      const useWorker = totalLength > config.botApiDownloadMaxBytes
       if (useWorker && (!workerUrlBase || !workerSecret)) {
         return reply
           .code(503)

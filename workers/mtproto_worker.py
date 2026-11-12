@@ -1,15 +1,25 @@
 import base64
+import hmac
 import os
-from typing import AsyncIterator
+from typing import AsyncIterator, Protocol
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError, FileReferenceExpiredError, RPCError, SessionRevokedError
+from telethon.errors import (
+    FileReferenceExpiredError,
+    FileReferenceInvalidError,
+    FloodWaitError,
+    RPCError,
+    SessionRevokedError,
+)
 
 from chunk_cache import ChunkCache
 from range_math import align_download_window, slice_download_chunk
 from worker_entities import find_dialog_entity
+
+load_dotenv()
 
 
 def resolve_bot_token(env: dict[str, str] | None = None) -> str:
@@ -21,15 +31,32 @@ def worker_ready_endpoint_names() -> tuple[str, ...]:
     return ('/healthz', '/health', '/readyz', '/ready')
 
 
-API_ID = int(os.getenv('API_ID', '0') or 0)
+def worker_secret_matches(provided: str | None, expected: str) -> bool:
+    if not provided or not expected:
+        return False
+    return hmac.compare_digest(provided.encode('utf-8'), expected.encode('utf-8'))
+
+
+def parse_integer_setting(name: str, value: str | None, default: int = 0) -> int:
+    if value is None or value.strip() == '':
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        raise RuntimeError(f'{name} must be an integer.') from None
+
+
+API_ID = parse_integer_setting('API_ID', os.getenv('API_ID'))
 API_HASH = os.getenv('API_HASH', '')
 BOT_TOKEN = resolve_bot_token()
 SESSION_PATH = os.getenv('TELEGRAM_SESSION_PATH', '/data/xenvo_mtproto.session')
 WORKER_SECRET = os.getenv('TELEGRAM_WORKER_SECRET', '')
-STORAGE_CHAT_ID = int(os.getenv('TELEGRAM_STORAGE_CHAT_ID', '0') or 0)
-DEFAULT_CHUNK_BYTES = int(os.getenv('STREAM_CHUNK_BYTES', '524288'))
-CHUNK_CACHE_BYTES = int(os.getenv('MEDIA_CHUNK_CACHE_BYTES', str(64 * 1024 * 1024)))
-MAX_ACTIVE_STREAMS = int(os.getenv('MAX_ACTIVE_STREAMS', '10'))
+STORAGE_CHAT_ID = parse_integer_setting('TELEGRAM_STORAGE_CHAT_ID', os.getenv('TELEGRAM_STORAGE_CHAT_ID'))
+DEFAULT_CHUNK_BYTES = parse_integer_setting('STREAM_CHUNK_BYTES', os.getenv('STREAM_CHUNK_BYTES'), 524288)
+CHUNK_CACHE_BYTES = parse_integer_setting(
+    'MEDIA_CHUNK_CACHE_BYTES', os.getenv('MEDIA_CHUNK_CACHE_BYTES'), 64 * 1024 * 1024
+)
+MAX_ACTIVE_STREAMS = parse_integer_setting('MAX_ACTIVE_STREAMS', os.getenv('MAX_ACTIVE_STREAMS'), 10)
 
 app = FastAPI(title='XENVO MTProto Worker', version='1.0.0')
 client: TelegramClient | None = None
@@ -38,10 +65,23 @@ chunk_cache = ChunkCache(CHUNK_CACHE_BYTES)
 active_streams = 0
 
 
+class ClosableChunkIterator(Protocol):
+    async def __anext__(self) -> bytes: ...
+
+    async def close(self) -> None: ...
+
+
+async def read_download_chunk(downloader: ClosableChunkIterator) -> bytes:
+    try:
+        return bytes(await downloader.__anext__())
+    finally:
+        await downloader.close()
+
+
 @app.on_event('startup')
 async def startup() -> None:
     global client, storage_entity
-    if not API_ID or not API_HASH or not BOT_TOKEN or not WORKER_SECRET or not STORAGE_CHAT_ID:
+    if API_ID <= 0 or not API_HASH or not BOT_TOKEN or not WORKER_SECRET or not STORAGE_CHAT_ID:
         raise RuntimeError('MTProto worker requires API_ID, API_HASH, BOT_TOKEN, TELEGRAM_WORKER_SECRET, and TELEGRAM_STORAGE_CHAT_ID.')
     if DEFAULT_CHUNK_BYTES < 4096 or DEFAULT_CHUNK_BYTES > 524288 or DEFAULT_CHUNK_BYTES % 4096:
         raise RuntimeError('STREAM_CHUNK_BYTES must be a 4 KiB multiple between 4096 and 524288.')
@@ -90,7 +130,7 @@ async def health() -> dict[str, object]:
         'service': 'xenvo-mtproto-worker',
         'telegram': {
             'connected': client is not None and client.is_connected(),
-            'authorized': client is not None,
+            'authorized': client is not None and client.is_connected(),
         },
         'storage': {'accessible': storage_entity is not None},
         'streaming': {'enabled': True},
@@ -102,11 +142,16 @@ async def health() -> dict[str, object]:
 async def ready(
     x_worker_secret: str | None = Header(default=None, alias='X-Worker-Secret'),
 ) -> dict[str, object]:
-    if x_worker_secret != WORKER_SECRET:
+    if not worker_secret_matches(x_worker_secret, WORKER_SECRET):
         raise HTTPException(status_code=403, detail='invalid-worker-secret')
-    if client is None:
+    if client is None or not client.is_connected() or storage_entity is None:
         raise HTTPException(status_code=503, detail='worker-not-ready')
-    me = await client.get_me()
+    try:
+        me = await client.get_me()
+    except Exception:
+        raise HTTPException(status_code=503, detail='telegram-not-ready') from None
+    if me is None:
+        raise HTTPException(status_code=503, detail='telegram-not-authorized')
     return {
         'status': 'ready',
         'service': 'xenvo-mtproto-worker',
@@ -126,7 +171,7 @@ async def media_info(
     message_id: int,
     x_worker_secret: str | None = Header(default=None, alias='X-Worker-Secret'),
 ) -> dict[str, object]:
-    if x_worker_secret != WORKER_SECRET:
+    if not worker_secret_matches(x_worker_secret, WORKER_SECRET):
         raise HTTPException(status_code=403, detail='invalid-worker-secret')
     if client is None:
         raise HTTPException(status_code=503, detail='mtproto-worker-not-ready')
@@ -151,7 +196,7 @@ async def media_info(
         }
     except HTTPException:
         raise
-    except FileReferenceExpiredError:
+    except (FileReferenceExpiredError, FileReferenceInvalidError):
         raise HTTPException(status_code=409, detail='FILE_REFERENCE_EXPIRED') from None
     except FloodWaitError as exc:
         raise HTTPException(status_code=429, detail=f'FLOOD_WAIT:{exc.seconds}') from None
@@ -173,7 +218,7 @@ async def media_range(
     x_worker_secret: str | None = Header(default=None, alias='X-Worker-Secret'),
 ) -> StreamingResponse:
     global active_streams
-    if x_worker_secret != WORKER_SECRET:
+    if not worker_secret_matches(x_worker_secret, WORKER_SECRET):
         raise HTTPException(status_code=403, detail='invalid-worker-secret')
 
     if client is None:
@@ -228,10 +273,10 @@ async def media_range(
                                 chunk_size=DEFAULT_CHUNK_BYTES,
                                 request_size=DEFAULT_CHUNK_BYTES,
                             )
-                            chunk = bytes(await downloader.__anext__())
+                            chunk = await read_download_chunk(downloader)
                         except StopAsyncIteration:
                             raise HTTPException(status_code=502, detail='telegram-range-ended-early') from None
-                        except FileReferenceExpiredError:
+                        except (FileReferenceExpiredError, FileReferenceInvalidError):
                             refresh_attempts += 1
                             if refresh_attempts > 2:
                                 raise HTTPException(status_code=409, detail='FILE_REFERENCE_EXPIRED') from None
@@ -264,7 +309,7 @@ async def media_range(
     except HTTPException:
         release_stream()
         raise
-    except FileReferenceExpiredError:
+    except (FileReferenceExpiredError, FileReferenceInvalidError):
         release_stream()
         raise HTTPException(status_code=409, detail='FILE_REFERENCE_EXPIRED') from None
     except SessionRevokedError:

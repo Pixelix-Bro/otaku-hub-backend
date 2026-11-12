@@ -78,7 +78,7 @@ export async function setMediaVisibility(
       { mediaId, deletedAt: null, storageStatus: 'stored' },
       { $set: { visibility, updatedAt: new Date() } }
     )
-  return result.modifiedCount === 1
+  return result.matchedCount === 1
 }
 
 export async function createMediaRecord(

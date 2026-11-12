@@ -163,11 +163,15 @@ export interface ParsedRangeHeader {
   isSuffix: boolean
 }
 
+export function isMultipartRangeHeader(rangeHeader: string | undefined): boolean {
+  return Boolean(rangeHeader && /^\s*bytes\s*=/i.test(rangeHeader) && rangeHeader.includes(','))
+}
+
 export function parseRangeHeader(
   rangeHeader: string | undefined,
   totalSize: number
 ): ParsedRangeHeader | null {
-  if (!Number.isFinite(totalSize) || totalSize <= 0 || !rangeHeader) {
+  if (!Number.isSafeInteger(totalSize) || totalSize <= 0 || !rangeHeader) {
     return null
   }
 
@@ -184,10 +188,10 @@ export function parseRangeHeader(
   const suffixMatch = /^-(\d+)$/i.exec(raw)
   if (suffixMatch) {
     const suffixLength = Number(suffixMatch[1])
-    if (!Number.isInteger(suffixLength) || suffixLength <= 0 || suffixLength > totalSize) {
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) {
       return null
     }
-    const start = Math.max(totalSize - suffixLength, 0)
+    const start = Math.max(totalSize - Math.min(suffixLength, totalSize), 0)
     const end = totalSize - 1
     return { start, end, length: end - start + 1, isSuffix: true }
   }
@@ -200,18 +204,18 @@ export function parseRangeHeader(
   const startRaw = rangeMatch[1]
   const endRaw = rangeMatch[2]
   const start = startRaw === '' ? 0 : Number(startRaw)
-  const end = endRaw === '' ? totalSize - 1 : Number(endRaw)
+  const requestedEnd = endRaw === '' ? totalSize - 1 : Number(endRaw)
 
   if (
-    !Number.isInteger(start) ||
-    !Number.isInteger(end) ||
+    !Number.isSafeInteger(start) ||
+    !Number.isSafeInteger(requestedEnd) ||
     start < 0 ||
-    end < start ||
-    start >= totalSize ||
-    end >= totalSize
+    requestedEnd < start ||
+    start >= totalSize
   ) {
     return null
   }
 
+  const end = Math.min(requestedEnd, totalSize - 1)
   return { start, end, length: end - start + 1, isSuffix: false }
 }

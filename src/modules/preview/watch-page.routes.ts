@@ -32,7 +32,8 @@ export async function watchPageRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(401).send({ ok: false, error: 'Valid watch token required' })
     }
 
-    const tokenRecord = await watchTokens.findByHash(hashWatchToken(token))
+    const tokenHash = hashWatchToken(token)
+    const tokenRecord = await watchTokens.findByHash(tokenHash)
     if (
       !tokenRecord ||
       tokenRecord.mediaId !== mediaId ||
@@ -47,6 +48,10 @@ export async function watchPageRoutes(app: FastifyInstance): Promise<void> {
     }
     if (media.mediaType !== 'video' && !media.mimeType?.startsWith('video/')) {
       return reply.code(415).send({ ok: false, error: 'This media is not a browser video' })
+    }
+    const claimedToken = await watchTokens.consumeIfUsable(tokenHash)
+    if (!claimedToken || claimedToken.mediaId !== mediaId) {
+      return reply.code(403).send({ ok: false, error: 'Watch link use limit reached or expired' })
     }
 
     const nonce = randomBytes(18).toString('base64')

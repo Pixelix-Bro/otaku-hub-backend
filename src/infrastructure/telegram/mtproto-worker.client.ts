@@ -13,7 +13,7 @@ export type WorkerReadiness =
   | { status: 'unauthorized'; httpStatus: 403 }
   | { status: 'not_found'; httpStatus: 404 }
   | { status: 'http_error'; httpStatus: number }
-  | { status: 'unreachable' }
+  | { status: 'unreachable'; reason?: 'dns' | 'connection' | 'timeout' | 'network' }
 
 export class MtprotoWorkerClient {
   constructor(
@@ -65,6 +65,8 @@ export class MtprotoWorkerClient {
       `${this.baseUrl.replace(/\/+$/, '')}/readyz`,
       `${this.baseUrl.replace(/\/+$/, '')}/ready`,
     ]
+    let unreachableReason: 'dns' | 'connection' | 'timeout' | 'network' = 'network'
+    let missingEndpointCount = 0
 
     for (const url of candidates) {
       try {
@@ -74,13 +76,30 @@ export class MtprotoWorkerClient {
         })
         if (response.ok) return { status: 'ready' }
         if (response.status === 403) return { status: 'unauthorized', httpStatus: 403 }
-        if (response.status === 404) continue
+        if (response.status === 404) {
+          missingEndpointCount++
+          continue
+        }
         return { status: 'http_error', httpStatus: response.status }
-      } catch {
+      } catch (error) {
+        const causeCode = (error as { cause?: { code?: unknown } }).cause?.code
+        if (causeCode === 'ENOTFOUND' || causeCode === 'EAI_AGAIN' || causeCode === 'ENODATA') {
+          unreachableReason = 'dns'
+        } else if (causeCode === 'ECONNREFUSED') {
+          unreachableReason = 'connection'
+        } else if (
+          (error instanceof Error && error.name === 'TimeoutError') ||
+          causeCode === 'ETIMEDOUT'
+        ) {
+          unreachableReason = 'timeout'
+        }
         continue
       }
     }
 
-    return { status: 'unreachable' }
+    if (missingEndpointCount === candidates.length) {
+      return { status: 'not_found', httpStatus: 404 }
+    }
+    return { status: 'unreachable', reason: unreachableReason }
   }
 }

@@ -27,9 +27,10 @@ export class TelegramBotApiClient {
     let lastError: Error | null = null
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      let timeoutId: ReturnType<typeof setTimeout> | undefined
       try {
         const controller = new AbortController()
-        const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+        timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
 
         const response = await fetch(url, {
           method: 'POST',
@@ -38,9 +39,9 @@ export class TelegramBotApiClient {
           signal: controller.signal,
         })
 
-        clearTimeout(timeoutId)
-
         const data = (await response.json()) as TelegramApiResponse<T>
+        clearTimeout(timeoutId)
+        timeoutId = undefined
 
         if (data.ok && data.result !== undefined) {
           return data.result
@@ -74,6 +75,7 @@ export class TelegramBotApiClient {
           data.description
         )
       } catch (error) {
+        if (timeoutId) clearTimeout(timeoutId)
         if (error instanceof TelegramApiError) throw error
 
         lastError = error as Error

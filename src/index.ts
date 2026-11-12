@@ -1,13 +1,21 @@
+import type { FastifyInstance } from 'fastify'
+
 import { bootstrap, initializeBackend } from './app/bootstrap.js'
+import { gracefulShutdown, registerShutdownHandlers } from './app/shutdown.js'
+import { getConfig } from './config/env.js'
+
+let server: FastifyInstance | undefined
+registerShutdownHandlers(() => server)
 
 async function main(): Promise<void> {
-  const server = await bootstrap()
+  const activeServer = await bootstrap()
+  server = activeServer
   try {
-    const port = Number(process.env.PORT || 3000)
-    await server.listen({ host: '0.0.0.0', port })
+    const port = getConfig().port
+    await activeServer.listen({ host: '0.0.0.0', port })
     await initializeBackend()
   } catch (error) {
-    await server.close().catch(() => undefined)
+    await gracefulShutdown(activeServer)
     throw error
   }
 }

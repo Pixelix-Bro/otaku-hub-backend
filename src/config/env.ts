@@ -18,12 +18,8 @@ export interface AppConfig {
   watchTokenTtlSeconds: number
   maxWatchTokenUses: number
   logLevel: string
-  telegramSessionPath?: string
   telegramWorkerUrl?: string
   telegramWorkerSecret?: string
-  streamChunkBytes: number
-  maxActiveStreams: number
-  maxPartsPerMedia: number
 }
 
 function requireEnv(name: string): string {
@@ -63,6 +59,10 @@ export function loadConfig(): AppConfig {
     ''
   )
   const publicWebUrl = optionalEnv('PUBLIC_WEB_URL', '').replace(/\/+$/, '')
+  const port = Number(optionalEnv('PORT', '3000'))
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('PORT must be an integer between 1 and 65535.')
+  }
 
   const storageChatId = requireEnv('TELEGRAM_STORAGE_CHAT_ID')
   if (!/^-?\d+$/.test(storageChatId)) {
@@ -114,21 +114,9 @@ export function loadConfig(): AppConfig {
   }
   const telegramWorkerSecret = telegramWorkerSecretRaw || undefined
 
-  const streamChunkBytes = Number(optionalEnv('STREAM_CHUNK_BYTES', '524288'))
-  const maxActiveStreams = Number(optionalEnv('MAX_ACTIVE_STREAMS', '10'))
-  const maxPartsPerMedia = Number(optionalEnv('MAX_PARTS_PER_MEDIA', '1000'))
-  if (
-    !Number.isSafeInteger(streamChunkBytes) ||
-    streamChunkBytes < 4096 ||
-    streamChunkBytes > 524288 ||
-    streamChunkBytes % 4096 !== 0
-  ) {
-    throw new Error('STREAM_CHUNK_BYTES must be a 4 KiB multiple between 4096 and 524288.')
-  }
-
   return {
     nodeEnv: optionalEnv('NODE_ENV', 'production'),
-    port: Number(optionalEnv('PORT', '3000')),
+    port,
     publicApiUrl,
     publicWebUrl,
     mongodbUri: requireEnv('MONGODB_URI'),
@@ -144,14 +132,8 @@ export function loadConfig(): AppConfig {
     watchTokenTtlSeconds: Number(optionalEnv('WATCH_TOKEN_TTL_SECONDS', '3600')),
     maxWatchTokenUses: Number(optionalEnv('MAX_WATCH_TOKEN_USES', '10')),
     logLevel: optionalEnv('LOG_LEVEL', 'info'),
-    telegramSessionPath: optionalEnv('TELEGRAM_SESSION_PATH', '/data/xenvo_mtproto.session'),
     telegramWorkerUrl,
     telegramWorkerSecret,
-    streamChunkBytes,
-    maxActiveStreams:
-      Number.isFinite(maxActiveStreams) && maxActiveStreams > 0 ? maxActiveStreams : 10,
-    maxPartsPerMedia:
-      Number.isFinite(maxPartsPerMedia) && maxPartsPerMedia > 0 ? maxPartsPerMedia : 1000,
   }
 }
 

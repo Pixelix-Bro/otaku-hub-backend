@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatFileSize, parseRangeHeader } from '../../core/utils/index.js'
+import { loadConfig } from '../../config/env.js'
+import { formatFileSize, isMultipartRangeHeader, parseRangeHeader } from '../../core/utils/index.js'
 import {
   isAdminTelegramId,
   isValidAdminApiToken,
@@ -31,6 +32,38 @@ import {
 } from '../../modules/watch/watch-token.service.js'
 
 describe('Telegram media core', () => {
+  it('configures the backend worker without requiring Telegram MTProto credentials', () => {
+    const env = {
+      NODE_ENV: 'production',
+      BOT_TOKEN: '123456:ABCDEF_token',
+      TELEGRAM_STORAGE_CHAT_ID: '-1001234567890',
+      TELEGRAM_WEBHOOK_SECRET: 'webhook-secret',
+      TELEGRAM_ADMIN_IDS: '123456789',
+      MONGODB_URI: 'mongodb://localhost:27017',
+      MONGODB_DB: 'XENVO',
+      MEDIA_LINK_SECRET: 'media-link-secret',
+      TELEGRAM_WORKER_URL: 'http://worker.internal:8000',
+      TELEGRAM_WORKER_SECRET: 'worker-secret',
+      API_ID: '',
+      API_HASH: '',
+    }
+    const originalValues = new Map(Object.keys(env).map((key) => [key, process.env[key]]))
+    Object.assign(process.env, env)
+
+    try {
+      const config = loadConfig()
+      expect(config.telegramWorkerUrl).toBe(env.TELEGRAM_WORKER_URL)
+      expect(config.telegramWorkerSecret).toBe(env.TELEGRAM_WORKER_SECRET)
+      expect(config).not.toHaveProperty('mtprotoApiId')
+      expect(config).not.toHaveProperty('mtprotoApiHash')
+    } finally {
+      for (const [key, value] of originalValues) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  })
+
   it('creates media IDs in the required MED_XXXXXXXX format', () => {
     const mediaId = generateMediaId()
     expect(mediaId).toMatch(/^MED_[0-9A-F]{8}$/)
@@ -135,8 +168,23 @@ describe('Telegram media core', () => {
       length: 512000,
       isSuffix: true,
     })
-    expect(parseRangeHeader('bytes=999999-1000000', 1_000_000)).toBeNull()
+    expect(parseRangeHeader('bytes=-2000000', 1_000_000)).toEqual({
+      start: 0,
+      end: 999999,
+      length: 1_000_000,
+      isSuffix: true,
+    })
+    expect(parseRangeHeader('bytes=999999-1000000', 1_000_000)).toEqual({
+      start: 999999,
+      end: 999999,
+      length: 1,
+      isSuffix: false,
+    })
+    expect(parseRangeHeader('bytes=1000000-', 1_000_000)).toBeNull()
     expect(parseRangeHeader('bytes=abc', 1_000_000)).toBeNull()
+    expect(isMultipartRangeHeader('bytes=0-10,20-30')).toBe(true)
+    expect(isMultipartRangeHeader('bytes=0-10')).toBe(false)
+    expect(isMultipartRangeHeader('items=0-10,20-30')).toBe(false)
   })
 
   it('only allows web preview when a known size fits the configured cap', () => {

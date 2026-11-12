@@ -86,6 +86,10 @@ function workerStatusLabel(configured: boolean, probe: WorkerReadiness): string 
   if (probe.status === 'unauthorized') return 'Secret mos emas (HTTP 403)'
   if (probe.status === 'not_found') return 'URL yoki /ready yo‘li xato (HTTP 404)'
   if (probe.status === 'http_error') return `Worker xatosi (HTTP ${probe.httpStatus})`
+  if (probe.reason === 'dns')
+    return 'Private DNS topilmadi: project/environment/domainni tekshiring'
+  if (probe.reason === 'connection') return 'Worker porti ochiq emas: service va portni tekshiring'
+  if (probe.reason === 'timeout') return 'Worker ulanishi vaqtida javob bermadi'
   return 'Ulanib bo‘lmayapti: service, private URL yoki portni tekshiring'
 }
 
