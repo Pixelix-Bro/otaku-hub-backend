@@ -1,4 +1,15 @@
+node_modules/
+dist/
 .env
 .env.*
 !.env.example
-/node_modules
+*.js.map
+*.d.ts
+!src/**/*.d.ts
+coverage/
+.nyc_output/
+*.log
+.DS_Store
+Thumbs.db
+*.session
+*.session.txt
