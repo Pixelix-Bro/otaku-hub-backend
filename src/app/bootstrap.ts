@@ -10,6 +10,8 @@ import { createAllIndexes } from '../infrastructure/mongodb/indexes.js'
 import { getTelegramService } from '../infrastructure/telegram/telegram.service.js'
 import { registerServerRoutes } from './server.js'
 
+let startupReady = false
+
 export async function bootstrap(): Promise<ReturnType<typeof Fastify>> {
   const config = getConfig()
 
@@ -41,6 +43,34 @@ export async function bootstrap(): Promise<ReturnType<typeof Fastify>> {
 
   await registerServerRoutes(app)
 
+  app.get('/health/live', async () => ({ ok: true, status: 'live' }))
+  app.get('/health/ready', async () => {
+    const mongoHealthy = await isMongoDBHealthy()
+    const ready = startupReady && mongoHealthy
+    return {
+      ok: ready,
+      status: ready ? 'ready' : 'not_ready',
+      mongo: mongoHealthy,
+    }
+  })
+  app.get('/health', async (_, reply) => {
+    const mongoHealthy = await isMongoDBHealthy()
+    const ready = startupReady && mongoHealthy
+    return reply.code(ready ? 200 : 503).send({
+      ok: ready,
+      status: ready ? 'ok' : 'degraded',
+      mongo: mongoHealthy,
+      env: config.nodeEnv,
+    })
+  })
+
+  return app
+}
+
+export async function initializeBackend(): Promise<void> {
+  const config = getConfig()
+  startupReady = false
+
   try {
     await connectMongoDB()
     await createAllIndexes()
@@ -49,32 +79,13 @@ export async function bootstrap(): Promise<ReturnType<typeof Fastify>> {
     const telegramService = getTelegramService()
     await telegramService.initialize()
     logger.info('✅ Telegram bot verified and storage channel validated')
+    startupReady = true
   } catch (error) {
+    startupReady = false
     logger.error(
       { error },
       '❌ Startup validation failed: bot token, storage channel, or MongoDB issue'
     )
     throw error
   }
-
-  app.get('/health/live', async () => ({ ok: true, status: 'live' }))
-  app.get('/health/ready', async () => {
-    const dbHealthy = await isMongoDBHealthy()
-    return {
-      ok: dbHealthy,
-      status: dbHealthy ? 'ready' : 'not_ready',
-      mongo: dbHealthy,
-    }
-  })
-  app.get('/health', async (_, reply) => {
-    const dbHealthy = await isMongoDBHealthy()
-    return reply.code(dbHealthy ? 200 : 503).send({
-      ok: dbHealthy,
-      status: dbHealthy ? 'ok' : 'degraded',
-      mongo: dbHealthy,
-      env: config.nodeEnv,
-    })
-  })
-
-  return app
 }
