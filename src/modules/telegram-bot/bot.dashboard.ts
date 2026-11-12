@@ -170,7 +170,7 @@ export async function renderDashboard(): Promise<DashboardView> {
       config.publicApiUrl
         ? checkWebsite(`${config.publicApiUrl}/health/live`)
         : Promise.resolve<WebsiteReadiness>({ status: 'not_configured' }),
-      checkWebsite(config.publicWebUrl),
+      checkWebsite(`${config.publicWebUrl}/health/live`),
       isMongoDBHealthy()
         .then((healthy) => (healthy ? getStatistics() : null))
         .catch(() => null),
@@ -276,7 +276,7 @@ export async function renderMonitor(): Promise<DashboardView> {
       .validate()
       .then(() => true)
       .catch(() => false),
-    checkWebsite(config.publicWebUrl),
+    checkWebsite(`${config.publicWebUrl}/health/live`),
   ])
   const worker = workerProbe.status === 'ready'
   return {
