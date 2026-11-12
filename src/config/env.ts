@@ -18,8 +18,9 @@ export interface AppConfig {
   watchTokenTtlSeconds: number
   maxWatchTokenUses: number
   logLevel: string
-  telegramWorkerUrl?: string
-  telegramWorkerSecret?: string
+  telegramApiBaseUrl: string
+  telegramApiId?: string
+  telegramApiHash?: string
 }
 
 function requireEnv(name: string): string {
@@ -59,6 +60,19 @@ export function loadConfig(): AppConfig {
     ''
   )
   const publicWebUrl = optionalEnv('PUBLIC_WEB_URL', '').replace(/\/+$/, '')
+  const telegramApiBaseUrl = optionalEnv(
+    'TELEGRAM_API_BASE_URL',
+    'https://api.telegram.org'
+  ).replace(/\/+$/, '')
+  const telegramApiId = optionalEnv('TELEGRAM_API_ID', '')
+  const telegramApiHash = optionalEnv('TELEGRAM_API_HASH', '')
+  if (telegramApiBaseUrl !== 'https://api.telegram.org') {
+    if (!telegramApiId || !telegramApiHash) {
+      throw new Error(
+        'TELEGRAM_API_ID and TELEGRAM_API_HASH are required when using the official Telegram Local Bot API server.'
+      )
+    }
+  }
   const port = Number(optionalEnv('PORT', '3000'))
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error('PORT must be an integer between 1 and 65535.')
@@ -90,30 +104,6 @@ export function loadConfig(): AppConfig {
     throw new Error('❌ BOT_API_DOWNLOAD_MAX_BYTES must be a positive integer below 20 MiB.')
   }
 
-  const telegramWorkerUrlRaw = optionalEnv('TELEGRAM_WORKER_URL')
-  const telegramWorkerSecretRaw = optionalEnv('TELEGRAM_WORKER_SECRET')
-  const workerValues = [telegramWorkerUrlRaw, telegramWorkerSecretRaw]
-  const workerConfiguredCount = workerValues.filter(Boolean).length
-  if (workerConfiguredCount !== 0 && workerConfiguredCount !== workerValues.length) {
-    throw new Error(
-      'Configure TELEGRAM_WORKER_URL and TELEGRAM_WORKER_SECRET together to enable MTProto streaming.'
-    )
-  }
-
-  const telegramWorkerUrl = telegramWorkerUrlRaw.replace(/\/+$/, '') || undefined
-  if (telegramWorkerUrl) {
-    let parsedWorkerUrl: URL
-    try {
-      parsedWorkerUrl = new URL(telegramWorkerUrl)
-    } catch {
-      throw new Error('TELEGRAM_WORKER_URL must be an absolute HTTP(S) URL.')
-    }
-    if (parsedWorkerUrl.protocol !== 'http:' && parsedWorkerUrl.protocol !== 'https:') {
-      throw new Error('TELEGRAM_WORKER_URL must use HTTP or HTTPS.')
-    }
-  }
-  const telegramWorkerSecret = telegramWorkerSecretRaw || undefined
-
   return {
     nodeEnv: optionalEnv('NODE_ENV', 'production'),
     port,
@@ -132,8 +122,9 @@ export function loadConfig(): AppConfig {
     watchTokenTtlSeconds: Number(optionalEnv('WATCH_TOKEN_TTL_SECONDS', '3600')),
     maxWatchTokenUses: Number(optionalEnv('MAX_WATCH_TOKEN_USES', '10')),
     logLevel: optionalEnv('LOG_LEVEL', 'info'),
-    telegramWorkerUrl,
-    telegramWorkerSecret,
+    telegramApiBaseUrl,
+    telegramApiId: telegramApiId || undefined,
+    telegramApiHash: telegramApiHash || undefined,
   }
 }
 

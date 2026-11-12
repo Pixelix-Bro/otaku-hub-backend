@@ -5,7 +5,6 @@ import type { TelegramMessage, TelegramUpdate } from '../../core/types/index.js'
 import { formatDuration, formatFileSize } from '../../core/utils/index.js'
 import { logger } from '../../infrastructure/logger/logger.js'
 import { getCollection } from '../../infrastructure/mongodb/client.js'
-import { MtprotoWorkerClient } from '../../infrastructure/telegram/mtproto-worker.client.js'
 import { getTelegramService } from '../../infrastructure/telegram/telegram.service.js'
 import {
   consumeDeleteConfirmation,
@@ -189,38 +188,9 @@ async function processAdminUpload(message: TelegramMessage): Promise<void> {
     throw error
   }
 
-  const workerConfigured = Boolean(config.telegramWorkerUrl && config.telegramWorkerSecret)
-  let mtprotoInfo: Awaited<ReturnType<MtprotoWorkerClient['getMediaInfo']>> | null = null
-  if (workerConfigured && config.telegramWorkerUrl && config.telegramWorkerSecret) {
-    try {
-      mtprotoInfo = await new MtprotoWorkerClient(
-        config.telegramWorkerUrl,
-        config.telegramWorkerSecret
-      ).getMediaInfo(config.telegramStorageChatId, storageMessageId)
-    } catch (error) {
-      logger.warn(
-        {
-          mediaId: media.mediaId,
-          workerFailure: error instanceof Error ? error.message : 'unknown-worker-error',
-        },
-        'MTProto could not resolve uploaded storage media'
-      )
-    }
-  }
-
   const stored = await updateMediaStorage(media.mediaId, {
     storageStatus: 'stored',
     storageMessageId,
-    ...(mtprotoInfo
-      ? {
-          sizeBytes: mtprotoInfo.file_size,
-          mtprotoDocumentId: mtprotoInfo.document_id,
-          mtprotoAccessHash: mtprotoInfo.access_hash,
-          mtprotoDcId: mtprotoInfo.dc_id,
-          mtprotoFileReference: mtprotoInfo.file_reference,
-          mtprotoStatus: 'available' as const,
-        }
-      : { mtprotoStatus: workerConfigured ? ('unavailable' as const) : ('unconfigured' as const) }),
   })
   if (!stored) {
     await reply(
@@ -244,10 +214,8 @@ async function processAdminUpload(message: TelegramMessage): Promise<void> {
     })
     await watchTokens.create({ ...token, usedCount: 0 })
 
-    const workerReady = mtprotoInfo !== null
     const webPreviewUrl =
-      canPreviewMedia(metadata.sizeBytes, config.botApiDownloadMaxBytes, workerReady) &&
-      config.publicApiUrl
+      canPreviewMedia(metadata.sizeBytes, config.botApiDownloadMaxBytes) && config.publicApiUrl
         ? buildWatchPageUrl(config.publicApiUrl, media.mediaId, token.token)
         : null
 
@@ -376,49 +344,11 @@ async function processAdminCommand(message: TelegramMessage): Promise<void> {
       await reply(message, 'Stored media topilmadi. Foydalanish: /preview MEDIA_ID')
       return
     }
-    const workerConfigured = Boolean(config.telegramWorkerUrl && config.telegramWorkerSecret)
-    let previewSize = media.sizeBytes
-    let largeFileWorkerReady = media.mtprotoStatus === 'available'
-    if (
-      previewSize !== null &&
-      previewSize > config.botApiDownloadMaxBytes &&
-      !largeFileWorkerReady &&
-      workerConfigured &&
-      config.telegramWorkerUrl &&
-      config.telegramWorkerSecret
-    ) {
-      try {
-        const info = await new MtprotoWorkerClient(
-          config.telegramWorkerUrl,
-          config.telegramWorkerSecret
-        ).getMediaInfo(media.storageChatId, media.storageMessageId)
-        await updateMediaStorage(media.mediaId, {
-          storageStatus: 'stored',
-          sizeBytes: info.file_size,
-          mtprotoDocumentId: info.document_id,
-          mtprotoAccessHash: info.access_hash,
-          mtprotoDcId: info.dc_id,
-          mtprotoFileReference: info.file_reference,
-          mtprotoStatus: 'available',
-        })
-        previewSize = info.file_size
-        largeFileWorkerReady = true
-      } catch (error) {
-        logger.warn(
-          {
-            mediaId: media.mediaId,
-            workerFailure: error instanceof Error ? error.message : 'unknown-worker-error',
-          },
-          'MTProto could not refresh preview media metadata'
-        )
-
-        largeFileWorkerReady = false
-      }
-    }
-    if (!canPreviewMedia(previewSize, config.botApiDownloadMaxBytes, largeFileWorkerReady)) {
+    const previewSize = media.sizeBytes
+    if (!canPreviewMedia(previewSize, config.botApiDownloadMaxBytes)) {
       await reply(
         message,
-        `Web preview faqat ${formatFileSize(config.botApiDownloadMaxBytes)} gacha, yoki MTProto worker sozlangan bo‘lsa katta fayllarda ishlaydi. Bu media hajmi noma’lum yoki worker sozlanmagan.`
+        `Web preview faqat ${formatFileSize(config.botApiDownloadMaxBytes)} gacha bo‘lishi kerak. Bu media hajmi katta.`
       )
       return
     }
@@ -642,15 +572,11 @@ async function processCallback(update: TelegramUpdate): Promise<void> {
         await api.sendMessage(callback.message.chat.id, 'Saqlangan media topilmadi.')
         return
       }
-      const workerReady = Boolean(
-        media.mtprotoStatus === 'available' &&
-        config.telegramWorkerUrl &&
-        config.telegramWorkerSecret
-      )
-      if (!canPreviewMedia(media.sizeBytes, config.botApiDownloadMaxBytes, workerReady)) {
+      const localBotApiConfigured = config.telegramApiBaseUrl !== 'https://api.telegram.org'
+      if (!canPreviewMedia(media.sizeBytes, config.botApiDownloadMaxBytes, localBotApiConfigured)) {
         await api.sendMessage(
           callback.message.chat.id,
-          'Streaming uchun media yoki MTProto holati tayyor emas.'
+          'Streaming uchun media hajmi yoki Local Bot API konfiguratsiyasi tayyor emas.'
         )
         return
       }

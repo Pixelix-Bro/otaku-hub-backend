@@ -11,7 +11,7 @@ export class TelegramService {
 
   constructor() {
     const config = getConfig()
-    this.botApiClient = new TelegramBotApiClient(config.telegramBotToken)
+    this.botApiClient = new TelegramBotApiClient(config.telegramBotToken, config.telegramApiBaseUrl)
     this.storageChannel = new StorageChannelService(this.botApiClient, config.telegramStorageChatId)
   }
 

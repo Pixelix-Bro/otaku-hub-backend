@@ -63,14 +63,6 @@ export async function previewRoutes(app: FastifyInstance): Promise<void> {
         length: totalLength,
         isSuffix: false,
       }
-      const workerUrlBase = config.telegramWorkerUrl
-      const workerSecret = config.telegramWorkerSecret
-      const useWorker = totalLength > config.botApiDownloadMaxBytes
-      if (useWorker && (!workerUrlBase || !workerSecret)) {
-        return reply
-          .code(503)
-          .send({ ok: false, error: 'Large-media streaming worker is not configured' })
-      }
 
       const responseHeaders = buildStreamingHeaders({
         mediaId: media.mediaId,
@@ -94,53 +86,6 @@ export async function previewRoutes(app: FastifyInstance): Promise<void> {
       }
 
       try {
-        if (useWorker) {
-          if (!workerUrlBase || !workerSecret) {
-            return reply
-              .code(503)
-              .send({ ok: false, error: 'Large-media streaming worker is not configured' })
-          }
-          if (!media.storageChatId || media.storageMessageId === null) {
-            return reply
-              .code(404)
-              .send({ ok: false, error: 'Telegram storage location is unavailable' })
-          }
-          const workerUrl = new URL(`${workerUrlBase}/media-range`)
-          workerUrl.searchParams.set('chat_id', media.storageChatId)
-          workerUrl.searchParams.set('message_id', String(media.storageMessageId))
-          workerUrl.searchParams.set('offset', String(selectedRange.start))
-          workerUrl.searchParams.set('limit', String(selectedRange.length))
-          const upstream = await fetch(workerUrl, {
-            headers: { 'X-Worker-Secret': workerSecret },
-            signal: request.signal,
-          })
-          if (!upstream.ok || !upstream.body) {
-            const status = [404, 409, 416, 429, 503, 504].includes(upstream.status)
-              ? upstream.status
-              : 502
-            const error =
-              status === 404
-                ? 'Telegram source message or media is unavailable'
-                : status === 409
-                  ? 'Telegram file reference expired and must be refreshed'
-                  : status === 416
-                    ? 'Telegram rejected the requested byte range'
-                    : status === 429
-                      ? 'Telegram rate limit reached; retry after the indicated delay'
-                      : status === 503
-                        ? 'MTProto worker is unavailable or at capacity'
-                        : status === 504
-                          ? 'Telegram media request timed out'
-                          : 'MTProto worker could not fetch the requested media range'
-            return reply.code(status).send({
-              ok: false,
-              error,
-            })
-          }
-          setMediaResponseHeaders()
-          return reply.send(Readable.from(upstream.body as unknown as AsyncIterable<Uint8Array>))
-        }
-
         if (!media.telegramFileId) {
           return reply.code(404).send({ ok: false, error: 'Telegram file metadata is unavailable' })
         }

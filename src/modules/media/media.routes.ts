@@ -103,11 +103,8 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
     await watchTokens.create({ ...token, usedCount: 0 })
 
     const publicBaseUrl = config.publicApiUrl
-    const workerReady = Boolean(
-      config.telegramWorkerUrl && config.telegramWorkerSecret && media.mtprotoStatus === 'available'
-    )
     const previewUrl =
-      publicBaseUrl && canPreviewMedia(media.sizeBytes, config.botApiDownloadMaxBytes, workerReady)
+      publicBaseUrl && canPreviewMedia(media.sizeBytes, config.botApiDownloadMaxBytes)
         ? buildWatchPageUrl(publicBaseUrl, mediaId, token.token)
         : null
 
@@ -143,12 +140,9 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
     })
     await watchTokens.create({ ...token, usedCount: 0 })
 
-    const workerReady = Boolean(
-      config.telegramWorkerUrl && config.telegramWorkerSecret && media.mtprotoStatus === 'available'
-    )
     const basePreviewUrl =
       media.visibility === 'public' &&
-      canPreviewMedia(media.sizeBytes, config.botApiDownloadMaxBytes, workerReady)
+      canPreviewMedia(media.sizeBytes, config.botApiDownloadMaxBytes)
         ? buildWatchPageUrl(config.publicApiUrl || config.publicWebUrl, mediaId, token.token)
         : null
 

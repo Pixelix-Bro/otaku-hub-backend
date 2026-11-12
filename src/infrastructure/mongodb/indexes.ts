@@ -14,8 +14,6 @@ export async function createAllIndexes(): Promise<void> {
   await media.createIndex({ mediaType: 1 })
   await media.createIndex({ createdAt: -1 })
   await media.createIndex({ storageStatus: 1 })
-  await media.createIndex({ mtprotoDocumentId: 1 }, { sparse: true })
-  await media.createIndex({ mtprotoStatus: 1 })
   await media.createIndex({ deletedAt: 1 }, { sparse: true })
   await media.createIndex({ fileName: 'text', mediaId: 'text' }, { name: 'media_search_index' })
 

@@ -29,9 +29,9 @@ export function canPreviewPublicly(sizeBytes: number | null, limitBytes: number)
 export function canPreviewMedia(
   sizeBytes: number | null,
   botApiLimitBytes: number,
-  mtprotoWorkerReady: boolean
+  localBotApiConfigured = false
 ): boolean {
-  return sizeBytes !== null && (sizeBytes <= botApiLimitBytes || mtprotoWorkerReady)
+  return sizeBytes !== null && (sizeBytes <= botApiLimitBytes || localBotApiConfigured)
 }
 
 export function buildStreamingHeaders(input: {

@@ -7,12 +7,14 @@ const REQUEST_TIMEOUT_MS = 30_000
 const MAX_RETRIES = 3
 
 export class TelegramBotApiClient {
+  private readonly apiBaseUrl: string
   private readonly baseUrl: string
   private readonly token: string
 
-  constructor(token: string) {
+  constructor(token: string, baseUrl = 'https://api.telegram.org') {
     this.token = token
-    this.baseUrl = `https://api.telegram.org/bot${token}`
+    this.apiBaseUrl = baseUrl.replace(/\/+$/, '')
+    this.baseUrl = `${this.apiBaseUrl}/bot${token}`
   }
 
   /**
@@ -205,9 +207,9 @@ export class TelegramBotApiClient {
     return this.callApi<TelegramFile>('getFile', { file_id: fileId })
   }
 
-  /** Construct download URL for a file (INTERNAL USE ONLY) */
+  /** Construct download URL for a file (works with official hosted Bot API and Local Bot API server). */
   getFileUrl(filePath: string): string {
-    return `https://api.telegram.org/file/bot${this.token}/${filePath}`
+    return `${this.apiBaseUrl}/file/bot${this.token}/${filePath}`
   }
 
   /** Delete a message */

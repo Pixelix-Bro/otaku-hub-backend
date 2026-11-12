@@ -12,11 +12,6 @@ export interface MediaDocumentLike {
   sizeBytes: number | null
   telegramFileId: string | null
   telegramFileUniqueId: string | null
-  mtprotoDocumentId?: string | null
-  mtprotoAccessHash?: string | null
-  mtprotoDcId?: number | null
-  mtprotoFileReference?: string | null
-  mtprotoStatus?: 'unconfigured' | 'available' | 'unavailable'
   sourceChatId: string
   sourceMessageId: number
   storageChatId: string
@@ -95,11 +90,6 @@ export async function createMediaRecord(
     sizeBytes: input.sizeBytes ?? null,
     telegramFileId: input.telegramFileId ?? null,
     telegramFileUniqueId: input.telegramFileUniqueId ?? null,
-    mtprotoDocumentId: input.mtprotoDocumentId ?? null,
-    mtprotoAccessHash: input.mtprotoAccessHash ?? null,
-    mtprotoDcId: input.mtprotoDcId ?? null,
-    mtprotoFileReference: input.mtprotoFileReference ?? null,
-    mtprotoStatus: input.mtprotoStatus ?? 'unconfigured',
     sourceChatId: input.sourceChatId ?? 'unknown',
     sourceMessageId: input.sourceMessageId ?? 0,
     storageChatId: input.storageChatId ?? 'unknown',
@@ -127,11 +117,6 @@ export async function updateMediaStorage(
     storageStatus: string
     storageMessageId?: number | null
     sizeBytes?: number
-    mtprotoDocumentId?: string | null
-    mtprotoAccessHash?: string | null
-    mtprotoDcId?: number | null
-    mtprotoFileReference?: string | null
-    mtprotoStatus?: 'unconfigured' | 'available' | 'unavailable'
   }
 ): Promise<boolean> {
   const result = await getDb()
@@ -145,17 +130,6 @@ export async function updateMediaStorage(
             ? { storageMessageId: input.storageMessageId }
             : {}),
           ...(input.sizeBytes !== undefined ? { sizeBytes: input.sizeBytes } : {}),
-          ...(input.mtprotoDocumentId !== undefined
-            ? { mtprotoDocumentId: input.mtprotoDocumentId }
-            : {}),
-          ...(input.mtprotoAccessHash !== undefined
-            ? { mtprotoAccessHash: input.mtprotoAccessHash }
-            : {}),
-          ...(input.mtprotoDcId !== undefined ? { mtprotoDcId: input.mtprotoDcId } : {}),
-          ...(input.mtprotoFileReference !== undefined
-            ? { mtprotoFileReference: input.mtprotoFileReference }
-            : {}),
-          ...(input.mtprotoStatus !== undefined ? { mtprotoStatus: input.mtprotoStatus } : {}),
           updatedAt: new Date(),
         },
       }

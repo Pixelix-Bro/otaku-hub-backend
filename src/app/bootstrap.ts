@@ -7,7 +7,6 @@ import { getConfig } from '../config/env.js'
 import { logger } from '../infrastructure/logger/logger.js'
 import { connectMongoDB, isMongoDBHealthy } from '../infrastructure/mongodb/client.js'
 import { createAllIndexes } from '../infrastructure/mongodb/indexes.js'
-import { MtprotoWorkerClient } from '../infrastructure/telegram/mtproto-worker.client.js'
 import { getTelegramService } from '../infrastructure/telegram/telegram.service.js'
 import { registerServerRoutes } from './server.js'
 
@@ -56,36 +55,34 @@ export async function bootstrap(): Promise<ReturnType<typeof Fastify>> {
   app.get('/health/live', async () => ({ ok: true, status: 'live' }))
   app.get('/health/ready', async (_, reply) => {
     const mongoHealthy = await isMongoDBHealthy()
-    const workerConfigured = Boolean(config.telegramWorkerUrl && config.telegramWorkerSecret)
-    const workerReady = workerConfigured
-      ? await new MtprotoWorkerClient(
-          config.telegramWorkerUrl!,
-          config.telegramWorkerSecret!
-        ).isReady()
-      : false
-    const ready = startupReady && mongoHealthy && workerReady
+    const botHealthy = await getTelegramService()
+      .getBotApiClient()
+      .getMe()
+      .then(() => true)
+      .catch(() => false)
+    const ready = startupReady && mongoHealthy && botHealthy
     return reply.code(ready ? 200 : 503).send({
       ok: ready,
       status: ready ? 'ready' : 'not_ready',
       mongo: mongoHealthy,
-      mtprotoWorker: workerReady,
+      telegramBot: botHealthy,
+      telegramApiBaseUrl: config.telegramApiBaseUrl,
     })
   })
   app.get('/health', async (_, reply) => {
     const mongoHealthy = await isMongoDBHealthy()
-    const workerConfigured = Boolean(config.telegramWorkerUrl && config.telegramWorkerSecret)
-    const workerReady = workerConfigured
-      ? await new MtprotoWorkerClient(
-          config.telegramWorkerUrl!,
-          config.telegramWorkerSecret!
-        ).isReady()
-      : false
-    const ready = startupReady && mongoHealthy && workerReady
+    const botHealthy = await getTelegramService()
+      .getBotApiClient()
+      .getMe()
+      .then(() => true)
+      .catch(() => false)
+    const ready = startupReady && mongoHealthy && botHealthy
     return reply.code(ready ? 200 : 503).send({
       ok: ready,
       status: ready ? 'ok' : 'degraded',
       mongo: mongoHealthy,
-      mtprotoWorker: workerReady,
+      telegramBot: botHealthy,
+      telegramApiBaseUrl: config.telegramApiBaseUrl,
       env: config.nodeEnv,
     })
   })

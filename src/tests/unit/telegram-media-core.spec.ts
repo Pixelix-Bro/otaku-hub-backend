@@ -32,7 +32,7 @@ import {
 } from '../../modules/watch/watch-token.service.js'
 
 describe('Telegram media core', () => {
-  it('configures the backend worker without requiring Telegram MTProto credentials', () => {
+  it('configures the hosted Bot API by default and allows the Local Bot API server when configured', () => {
     const env = {
       NODE_ENV: 'production',
       BOT_TOKEN: '123456:ABCDEF_token',
@@ -42,20 +42,18 @@ describe('Telegram media core', () => {
       MONGODB_URI: 'mongodb://localhost:27017',
       MONGODB_DB: 'XENVO',
       MEDIA_LINK_SECRET: 'media-link-secret',
-      TELEGRAM_WORKER_URL: 'http://worker.internal:8000',
-      TELEGRAM_WORKER_SECRET: 'worker-secret',
-      API_ID: '',
-      API_HASH: '',
+      TELEGRAM_API_BASE_URL: 'http://telegram-bot-api:8081',
+      TELEGRAM_API_ID: '12345678',
+      TELEGRAM_API_HASH: 'local-bot-api-hash',
     }
     const originalValues = new Map(Object.keys(env).map((key) => [key, process.env[key]]))
     Object.assign(process.env, env)
 
     try {
       const config = loadConfig()
-      expect(config.telegramWorkerUrl).toBe(env.TELEGRAM_WORKER_URL)
-      expect(config.telegramWorkerSecret).toBe(env.TELEGRAM_WORKER_SECRET)
-      expect(config).not.toHaveProperty('mtprotoApiId')
-      expect(config).not.toHaveProperty('mtprotoApiHash')
+      expect(config.telegramApiBaseUrl).toBe(env.TELEGRAM_API_BASE_URL)
+      expect(config.telegramApiId).toBe(env.TELEGRAM_API_ID)
+      expect(config.telegramApiHash).toBe(env.TELEGRAM_API_HASH)
     } finally {
       for (const [key, value] of originalValues) {
         if (value === undefined) delete process.env[key]
@@ -187,13 +185,13 @@ describe('Telegram media core', () => {
     expect(isMultipartRangeHeader('items=0-10,20-30')).toBe(false)
   })
 
-  it('only allows web preview when a known size fits the configured cap', () => {
+  it('allows large previews when the Local Bot API server is configured', () => {
     expect(canPreviewPublicly(1024, 2048)).toBe(true)
     expect(canPreviewPublicly(2049, 2048)).toBe(false)
     expect(canPreviewPublicly(null, 2048)).toBe(false)
   })
 
-  it('allows large previews only when the MTProto worker is configured', () => {
+  it('allows large previews when the Local Bot API server is configured', () => {
     expect(canPreviewMedia(null, 20 * 1024 * 1024, true)).toBe(false)
     expect(canPreviewMedia(10 * 1024 * 1024, 20 * 1024 * 1024, false)).toBe(true)
     expect(canPreviewMedia(399 * 1024 * 1024, 20 * 1024 * 1024, false)).toBe(false)

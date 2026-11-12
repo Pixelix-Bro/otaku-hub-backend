@@ -4,10 +4,6 @@ import { COLLECTIONS } from '../../config/constants.js'
 import { getConfig } from '../../config/env.js'
 import { formatDuration, formatFileSize } from '../../core/utils/index.js'
 import { getDb, isMongoDBHealthy } from '../../infrastructure/mongodb/client.js'
-import {
-  MtprotoWorkerClient,
-  type WorkerReadiness,
-} from '../../infrastructure/telegram/mtproto-worker.client.js'
 import { getTelegramService } from '../../infrastructure/telegram/telegram.service.js'
 import type { MediaDocumentLike } from '../media/media.service.js'
 
@@ -80,19 +76,6 @@ async function checkWebsite(url: string): Promise<WebsiteReadiness> {
   }
 }
 
-function workerStatusLabel(configured: boolean, probe: WorkerReadiness): string {
-  if (!configured) return 'Sozlanmagan'
-  if (probe.status === 'ready') return 'Online'
-  if (probe.status === 'unauthorized') return 'Secret mos emas (HTTP 403)'
-  if (probe.status === 'not_found') return 'URL yoki /ready yo‘li xato (HTTP 404)'
-  if (probe.status === 'http_error') return `Worker xatosi (HTTP ${probe.httpStatus})`
-  if (probe.reason === 'dns')
-    return 'Private DNS topilmadi: project/environment/domainni tekshiring'
-  if (probe.reason === 'connection') return 'Worker porti ochiq emas: service va portni tekshiring'
-  if (probe.reason === 'timeout') return 'Worker ulanishi vaqtida javob bermadi'
-  return 'Ulanib bo‘lmayapti: service, private URL yoki portni tekshiring'
-}
-
 function websiteStatusLabel(probe: WebsiteReadiness): string {
   if (probe.status === 'not_configured') return 'PUBLIC_WEB_URL sozlanmagan'
   if (probe.status === 'available') return 'Available'
@@ -105,13 +88,8 @@ async function getStatistics() {
   const media = getDb().collection(COLLECTIONS.MEDIA)
   const active = { deletedAt: null }
   const streamable = {
-    $or: [
-      {
-        sizeBytes: { $gt: 0, $lte: config.botApiDownloadMaxBytes },
-        telegramFileId: { $type: 'string' },
-      },
-      { mtprotoStatus: 'available' },
-    ],
+    sizeBytes: { $gt: 0, $lte: config.botApiDownloadMaxBytes },
+    telegramFileId: { $type: 'string' },
   }
   const [total, video, photo, audio, documents, ready, processing, failed, size] =
     await Promise.all([
@@ -124,10 +102,7 @@ async function getStatistics() {
       media.countDocuments({ ...active, storageStatus: { $in: ['pending', 'copying'] } }),
       media.countDocuments({
         ...active,
-        $or: [
-          { storageStatus: { $in: ['copy_failed', 'copy_unknown'] } },
-          { mtprotoStatus: 'unavailable' },
-        ],
+        storageStatus: { $in: ['copy_failed', 'copy_unknown'] },
       }),
       media
         .aggregate([
@@ -151,35 +126,26 @@ async function getStatistics() {
 
 export async function renderDashboard(): Promise<DashboardView> {
   const config = getConfig()
-  const workerConfigured = Boolean(config.telegramWorkerUrl && config.telegramWorkerSecret)
-  const [database, telegram, storage, workerProbe, apiProbe, websiteProbe, statistics] =
-    await Promise.all([
-      isMongoDBHealthy().catch(() => false),
-      getTelegramService()
-        .getBotApiClient()
-        .getMe()
-        .then(() => true)
-        .catch(() => false),
-      getTelegramService()
-        .getStorageChannel()
-        .validate()
-        .then(() => true)
-        .catch(() => false),
-      workerConfigured
-        ? new MtprotoWorkerClient(
-            config.telegramWorkerUrl!,
-            config.telegramWorkerSecret!
-          ).probeReadiness()
-        : Promise.resolve<WorkerReadiness>({ status: 'unreachable' }),
-      config.publicApiUrl
-        ? checkWebsite(`${config.publicApiUrl}/health/live`)
-        : Promise.resolve<WebsiteReadiness>({ status: 'not_configured' }),
-      checkWebsite(`${config.publicWebUrl}/health/live`),
-      isMongoDBHealthy()
-        .then((healthy) => (healthy ? getStatistics() : null))
-        .catch(() => null),
-    ])
-  const worker = workerProbe.status === 'ready'
+  const [database, telegram, storage, apiProbe, websiteProbe, statistics] = await Promise.all([
+    isMongoDBHealthy().catch(() => false),
+    getTelegramService()
+      .getBotApiClient()
+      .getMe()
+      .then(() => true)
+      .catch(() => false),
+    getTelegramService()
+      .getStorageChannel()
+      .validate()
+      .then(() => true)
+      .catch(() => false),
+    config.publicApiUrl
+      ? checkWebsite(`${config.publicApiUrl}/health/live`)
+      : Promise.resolve<WebsiteReadiness>({ status: 'not_configured' }),
+    checkWebsite(`${config.publicWebUrl}/health/live`),
+    isMongoDBHealthy()
+      .then((healthy) => (healthy ? getStatistics() : null))
+      .catch(() => null),
+  ])
   const api = apiProbe.status === 'available'
 
   const statisticsText = statistics
@@ -193,7 +159,7 @@ export async function renderDashboard(): Promise<DashboardView> {
     '<b>ASOSIY TIZIM HOLATI</b>',
     `${icon(telegram)} Telegram Bot API: ${telegram ? 'Online' : 'Mavjud emas'}`,
     `${icon(storage)} Telegram Storage: ${storage ? 'Connected' : 'Mavjud emas'}`,
-    `${icon(worker)} MTProto Worker: ${workerStatusLabel(workerConfigured, workerProbe)}`,
+    `${icon(true)} Local Bot API Server: ${config.telegramApiBaseUrl !== 'https://api.telegram.org' ? 'Configured' : 'Hosted API'}`,
     `${icon(database)} Database: ${database ? 'Online' : 'Mavjud emas'}`,
     `${icon(api)} Media API: ${api ? 'Online' : 'Mavjud emas'}`,
     `${icon(websiteProbe.status === 'available')} Website: ${websiteStatusLabel(websiteProbe)}`,
@@ -250,7 +216,7 @@ export async function renderStatistics(): Promise<DashboardView> {
       `🖼 Rasm: ${stats.photo}`,
       `🎵 Audio: ${stats.audio}`,
       `📄 Hujjat: ${stats.documents}`,
-      `🟢 MTProto orqali tayyor: ${stats.ready}`,
+      `🟢 Tayyor: ${stats.ready}`,
       `🟡 Jarayonda: ${stats.processing}`,
       `🔴 Xatolik: ${stats.failed}`,
       '━━━━━━━━━━━━━━━━━━━━',
@@ -261,15 +227,8 @@ export async function renderStatistics(): Promise<DashboardView> {
 
 export async function renderMonitor(): Promise<DashboardView> {
   const config = getConfig()
-  const workerConfigured = Boolean(config.telegramWorkerUrl && config.telegramWorkerSecret)
-  const [database, workerProbe, telegram, storage, websiteProbe] = await Promise.all([
+  const [database, telegram, storage, websiteProbe] = await Promise.all([
     isMongoDBHealthy().catch(() => false),
-    workerConfigured
-      ? new MtprotoWorkerClient(
-          config.telegramWorkerUrl!,
-          config.telegramWorkerSecret!
-        ).probeReadiness()
-      : Promise.resolve<WorkerReadiness>({ status: 'unreachable' }),
     getTelegramService()
       .getBotApiClient()
       .getMe()
@@ -282,7 +241,6 @@ export async function renderMonitor(): Promise<DashboardView> {
       .catch(() => false),
     checkWebsite(`${config.publicWebUrl}/health/live`),
   ])
-  const worker = workerProbe.status === 'ready'
   return {
     text: [
       '🖥 <b>XENVO SYSTEM MONITOR</b>',
@@ -290,7 +248,7 @@ export async function renderMonitor(): Promise<DashboardView> {
       '<b>SERVICES</b>',
       `${icon(telegram)} Telegram Bot API: ${telegram ? 'Online' : 'Mavjud emas'}`,
       `${icon(storage)} Telegram Storage: ${storage ? 'Connected' : 'Mavjud emas'}`,
-      `${icon(worker)} MTProto Worker: ${workerStatusLabel(workerConfigured, workerProbe)}`,
+      `${icon(true)} Local Bot API Server: ${config.telegramApiBaseUrl !== 'https://api.telegram.org' ? 'Configured' : 'Hosted API'}`,
       `${icon(database)} MongoDB: ${database ? 'Online' : 'Mavjud emas'}`,
       'Backend API: Online (ushbu javobdan tasdiqlandi)',
       `${icon(websiteProbe.status === 'available')} Website: ${websiteStatusLabel(websiteProbe)}`,
@@ -308,7 +266,7 @@ export function renderHelp(): DashboardView {
       '━━━━━━━━━━━━━━━━━━━━',
       'Media yuklash: “Media yuklash” tugmasini bosing va faylni botga yuboring.',
       'Kutubxona: saqlangan media ro‘yxati va tafsilotlarini oching.',
-      'Sayt preview: kichik fayllar Bot API, katta fayllar esa MTProto worker tayyor bo‘lsa ochiladi.',
+      'Sayt preview: Local Bot API Server sozlangan bo‘lsa, fayl hajmiga bog‘liq holda streaming ochiladi.',
       '━━━━━━━━━━━━━━━━━━━━',
     ].join('\n'),
     reply_markup: { inline_keyboard: [[button('🏠 Asosiy menyu', 'menu:home')]] },
@@ -354,10 +312,7 @@ export async function renderLibrary(page = 1, mediaType = 'all'): Promise<Dashbo
   } else if (safeType === 'processing') {
     filter.storageStatus = { $in: ['pending', 'copying'] }
   } else if (safeType === 'failed') {
-    filter.$or = [
-      { storageStatus: { $in: ['copy_failed', 'copy_unknown'] } },
-      { mtprotoStatus: 'unavailable' },
-    ]
+    filter.storageStatus = { $in: ['copy_failed', 'copy_unknown'] }
   } else if (safeType === 'public' || safeType === 'private') {
     filter.visibility = safeType
   }
@@ -414,7 +369,7 @@ export async function renderLibrary(page = 1, mediaType = 'all'): Promise<Dashbo
 
 export function renderMediaDetails(media: MediaDocumentLike): DashboardView {
   const filename = escapeHtml(media.fileName ?? 'Noma’lum')
-  const webReady = media.storageStatus === 'stored' && media.mtprotoStatus === 'available'
+  const webReady = media.storageStatus === 'stored'
   return {
     text: [
       '📊 <b>MEDIA TAFSILOTLARI</b>',
@@ -436,8 +391,7 @@ export function renderMediaDetails(media: MediaDocumentLike): DashboardView {
       `Source chat ID: <code>${escapeHtml(media.sourceChatId)}</code>`,
       `Source message ID: <code>${media.sourceMessageId}</code>`,
       `Telegram file ID: <code>${escapeHtml(media.telegramFileId ?? 'Noma’lum')}</code>`,
-      `MTProto: ${escapeHtml(media.mtprotoStatus ?? 'unavailable')}`,
-      `Website streaming: ${webReady ? 'MTProto source resolved' : 'Not verified'}`,
+      `Website streaming: ${webReady ? 'Bot API source ready' : 'Not verified'}`,
       '━━━━━━━━━━━━━━━━━━━━',
     ].join('\n'),
     reply_markup: {
