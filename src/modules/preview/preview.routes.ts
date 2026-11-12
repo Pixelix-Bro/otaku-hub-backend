@@ -7,9 +7,16 @@ import { getTelegramService } from '../../infrastructure/telegram/telegram.servi
 import { getMediaById } from '../media/media.service.js'
 import { WatchTokenRepository } from '../watch/watch-token.repository.js'
 import { hashWatchToken, isWatchTokenExpired } from '../watch/watch-token.service.js'
-import { buildStreamingHeaders } from './preview.service.js'
+import {
+  buildStreamingHeaders,
+  fetchWithRetry,
+  readByteRange,
+  shouldHonorRange,
+  shouldReturnNotModified,
+} from './preview.service.js'
 
 const watchTokens = new WatchTokenRepository()
+const HOSTED_BOT_API_GET_FILE_LIMIT_BYTES = 20 * 1024 * 1024
 
 export async function previewRoutes(app: FastifyInstance): Promise<void> {
   app.route({
@@ -51,11 +58,56 @@ export async function previewRoutes(app: FastifyInstance): Promise<void> {
 
       const totalLength = media.sizeBytes
       const multipartRange = isMultipartRangeHeader(rangeHeader)
-      const range = multipartRange ? null : parseRangeHeader(rangeHeader, totalLength)
-      if (rangeHeader && !range && !multipartRange) {
+      const requestedRange = multipartRange ? null : parseRangeHeader(rangeHeader, totalLength)
+      const fullResponseHeaders = buildStreamingHeaders({
+        mediaId: media.mediaId,
+        fileUniqueId: media.telegramFileUniqueId,
+        fileName: media.fileName,
+        mimeType: media.mimeType,
+        sizeBytes: totalLength,
+        updatedAt: media.updatedAt,
+        range: null,
+      })
+      const copyResponseHeaders = (headers: Record<string, string>): void => {
+        for (const [name, value] of Object.entries(headers)) {
+          reply.header(name, value)
+        }
+      }
+
+      const ifNoneMatch =
+        typeof request.headers['if-none-match'] === 'string'
+          ? request.headers['if-none-match']
+          : undefined
+      const ifModifiedSince =
+        typeof request.headers['if-modified-since'] === 'string'
+          ? request.headers['if-modified-since']
+          : undefined
+      if (
+        shouldReturnNotModified(
+          ifNoneMatch,
+          ifModifiedSince,
+          fullResponseHeaders.ETag!,
+          media.updatedAt
+        )
+      ) {
+        copyResponseHeaders(fullResponseHeaders)
+        return reply.code(304).send()
+      }
+
+      if (rangeHeader && !requestedRange && !multipartRange) {
+        reply.header('Accept-Ranges', 'bytes')
+        reply.header('ETag', fullResponseHeaders.ETag!)
+        reply.header('Last-Modified', fullResponseHeaders['Last-Modified']!)
         reply.header('Content-Range', `bytes */${totalLength}`)
         return reply.code(416).send({ ok: false, error: 'Invalid range request' })
       }
+
+      const ifRange =
+        typeof request.headers['if-range'] === 'string' ? request.headers['if-range'] : undefined
+      const range =
+        requestedRange && shouldHonorRange(ifRange, fullResponseHeaders.ETag!, media.updatedAt)
+          ? requestedRange
+          : null
 
       const selectedRange = range ?? {
         start: 0,
@@ -64,19 +116,20 @@ export async function previewRoutes(app: FastifyInstance): Promise<void> {
         isSuffix: false,
       }
 
-      const responseHeaders = buildStreamingHeaders({
-        mediaId: media.mediaId,
-        fileUniqueId: media.telegramFileUniqueId,
-        fileName: media.fileName,
-        mimeType: media.mimeType,
-        sizeBytes: totalLength,
-        updatedAt: media.updatedAt,
-        range,
-      })
+      const responseHeaders =
+        range === null
+          ? fullResponseHeaders
+          : buildStreamingHeaders({
+              mediaId: media.mediaId,
+              fileUniqueId: media.telegramFileUniqueId,
+              fileName: media.fileName,
+              mimeType: media.mimeType,
+              sizeBytes: totalLength,
+              updatedAt: media.updatedAt,
+              range,
+            })
       const setMediaResponseHeaders = (): void => {
-        for (const [name, value] of Object.entries(responseHeaders)) {
-          reply.header(name, value)
-        }
+        copyResponseHeaders(responseHeaders)
         if (range) reply.code(206)
       }
 
@@ -86,15 +139,44 @@ export async function previewRoutes(app: FastifyInstance): Promise<void> {
       }
 
       try {
+        const telegramService = getTelegramService()
+        const mtproto = telegramService.getMtprotoFileReader()
+        if (mtproto.isConfigured) {
+          setMediaResponseHeaders()
+          return reply.send(
+            Readable.from(
+              mtproto.readMessageRange({
+                storageChatId: media.storageChatId,
+                storageMessageId: media.storageMessageId!,
+                offset: selectedRange.start,
+                length: selectedRange.length,
+                signal: request.signal,
+              })
+            )
+          )
+        }
+
+        if (
+          media.sizeBytes > HOSTED_BOT_API_GET_FILE_LIMIT_BYTES &&
+          config.telegramApiBaseUrl === 'https://api.telegram.org'
+        ) {
+          return reply.code(503).send({
+            ok: false,
+            error:
+              'Telegram hosted Bot API cannot download this file. Configure TELEGRAM_MTPROTO_API_ID and TELEGRAM_MTPROTO_API_HASH for MTProto byte-range streaming.',
+          })
+        }
+
         if (!media.telegramFileId) {
           return reply.code(404).send({ ok: false, error: 'Telegram file metadata is unavailable' })
         }
-        const botApi = getTelegramService().getBotApiClient()
+        const botApi = telegramService.getBotApiClient()
         const telegramFile = await botApi.getFile(media.telegramFileId)
         if (!telegramFile.file_path) {
           return reply.code(502).send({ ok: false, error: 'Telegram did not provide a file path' })
         }
-        const upstream = await fetch(botApi.getFileUrl(telegramFile.file_path), {
+        const upstream = await fetchWithRetry(fetch, botApi.getFileUrl(telegramFile.file_path), {
+          ...(range ? { headers: { Range: `bytes=${range.start}-${range.end}` } } : {}),
           signal: request.signal,
         })
         if (!upstream.ok || !upstream.body) {
@@ -104,8 +186,27 @@ export async function previewRoutes(app: FastifyInstance): Promise<void> {
         if (!range) {
           return reply.send(Readable.from(upstream.body as unknown as AsyncIterable<Uint8Array>))
         }
-        const data = Buffer.from(await upstream.arrayBuffer())
-        return reply.send(data.subarray(selectedRange.start, selectedRange.end + 1))
+
+        if (upstream.status === 206) {
+          const expectedContentRange = `bytes ${range.start}-${range.end}/${totalLength}`
+          if (upstream.headers.get('content-range') !== expectedContentRange) {
+            await upstream.body.cancel()
+            return reply
+              .code(502)
+              .send({ ok: false, error: 'Telegram returned an invalid byte range' })
+          }
+          return reply.send(Readable.from(upstream.body as unknown as AsyncIterable<Uint8Array>))
+        }
+
+        return reply.send(
+          Readable.from(
+            readByteRange(
+              upstream.body as unknown as AsyncIterable<Uint8Array>,
+              selectedRange.start,
+              selectedRange.length
+            )
+          )
+        )
       } catch {
         return reply.code(502).send({ ok: false, error: 'Telegram preview request failed' })
       }

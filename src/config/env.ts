@@ -14,13 +14,15 @@ export interface AppConfig {
   adminTelegramIds: number[]
   adminApiToken?: string
   mediaLinkSecret: string
-  botApiDownloadMaxBytes: number
   watchTokenTtlSeconds: number
   maxWatchTokenUses: number
   logLevel: string
   telegramApiBaseUrl: string
-  telegramApiId?: string
-  telegramApiHash?: string
+  telegramMtprotoApiId?: number
+  telegramMtprotoApiHash?: string
+  telegramMtprotoSession?: string
+  telegramMtprotoMaxConcurrentDownloads: number
+  telegramMtprotoRequestSizeBytes: number
 }
 
 function requireEnv(name: string): string {
@@ -60,18 +62,50 @@ export function loadConfig(): AppConfig {
     ''
   )
   const publicWebUrl = optionalEnv('PUBLIC_WEB_URL', '').replace(/\/+$/, '')
-  const telegramApiBaseUrl = optionalEnv(
-    'TELEGRAM_API_BASE_URL',
+  const telegramApiBaseUrl = (
+    firstAvailableEnv('TELEGRAM_BOT_API_BASE_URL', 'TELEGRAM_API_BASE_URL') ||
     'https://api.telegram.org'
   ).replace(/\/+$/, '')
-  const telegramApiId = optionalEnv('TELEGRAM_API_ID', '')
-  const telegramApiHash = optionalEnv('TELEGRAM_API_HASH', '')
-  if (telegramApiBaseUrl !== 'https://api.telegram.org') {
-    if (!telegramApiId || !telegramApiHash) {
-      throw new Error(
-        'TELEGRAM_API_ID and TELEGRAM_API_HASH are required when using the official Telegram Local Bot API server.'
-      )
-    }
+  const mtprotoApiIdRaw = firstAvailableEnv('TELEGRAM_MTPROTO_API_ID', 'TELEGRAM_API_ID', 'API_ID')
+  const mtprotoApiHash = firstAvailableEnv(
+    'TELEGRAM_MTPROTO_API_HASH',
+    'TELEGRAM_API_HASH',
+    'API_HASH'
+  )
+  const telegramMtprotoApiId = mtprotoApiIdRaw ? Number(mtprotoApiIdRaw) : undefined
+  if ((telegramMtprotoApiId === undefined) !== !mtprotoApiHash) {
+    throw new Error(
+      'Both TELEGRAM_MTPROTO_API_ID and TELEGRAM_MTPROTO_API_HASH must be set together.'
+    )
+  }
+  if (
+    telegramMtprotoApiId !== undefined &&
+    (!Number.isSafeInteger(telegramMtprotoApiId) || telegramMtprotoApiId <= 0)
+  ) {
+    throw new Error('TELEGRAM_MTPROTO_API_ID must be a positive integer.')
+  }
+  const telegramMtprotoMaxConcurrentDownloads = Number(
+    optionalEnv('TELEGRAM_MTPROTO_MAX_CONCURRENT_DOWNLOADS', '6')
+  )
+  if (
+    !Number.isInteger(telegramMtprotoMaxConcurrentDownloads) ||
+    telegramMtprotoMaxConcurrentDownloads < 1 ||
+    telegramMtprotoMaxConcurrentDownloads > 32
+  ) {
+    throw new Error('TELEGRAM_MTPROTO_MAX_CONCURRENT_DOWNLOADS must be between 1 and 32.')
+  }
+  const telegramMtprotoRequestSizeBytes = Number(
+    optionalEnv('TELEGRAM_MTPROTO_REQUEST_SIZE_BYTES', String(512 * 1024))
+  )
+  if (
+    !Number.isInteger(telegramMtprotoRequestSizeBytes) ||
+    telegramMtprotoRequestSizeBytes < 4096 ||
+    telegramMtprotoRequestSizeBytes > 1024 * 1024 ||
+    telegramMtprotoRequestSizeBytes % 4096 !== 0
+  ) {
+    throw new Error(
+      'TELEGRAM_MTPROTO_REQUEST_SIZE_BYTES must be a multiple of 4096 between 4096 and 1048576.'
+    )
   }
   const port = Number(optionalEnv('PORT', '3000'))
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -95,15 +129,6 @@ export function loadConfig(): AppConfig {
     )
   }
 
-  const botApiDownloadMaxBytes = Number(optionalEnv('BOT_API_DOWNLOAD_MAX_BYTES', '19922944'))
-  if (
-    !Number.isSafeInteger(botApiDownloadMaxBytes) ||
-    botApiDownloadMaxBytes <= 0 ||
-    botApiDownloadMaxBytes >= 20 * 1024 * 1024
-  ) {
-    throw new Error('❌ BOT_API_DOWNLOAD_MAX_BYTES must be a positive integer below 20 MiB.')
-  }
-
   return {
     nodeEnv: optionalEnv('NODE_ENV', 'production'),
     port,
@@ -118,13 +143,17 @@ export function loadConfig(): AppConfig {
     adminTelegramIds,
     adminApiToken: optionalEnv('ADMIN_API_TOKEN', '') || undefined,
     mediaLinkSecret: requireEnv('MEDIA_LINK_SECRET'),
-    botApiDownloadMaxBytes,
     watchTokenTtlSeconds: Number(optionalEnv('WATCH_TOKEN_TTL_SECONDS', '3600')),
     maxWatchTokenUses: Number(optionalEnv('MAX_WATCH_TOKEN_USES', '10')),
     logLevel: optionalEnv('LOG_LEVEL', 'info'),
     telegramApiBaseUrl,
-    telegramApiId: telegramApiId || undefined,
-    telegramApiHash: telegramApiHash || undefined,
+    ...(telegramMtprotoApiId !== undefined ? { telegramMtprotoApiId } : {}),
+    ...(mtprotoApiHash ? { telegramMtprotoApiHash: mtprotoApiHash } : {}),
+    ...(optionalEnv('TELEGRAM_MTPROTO_SESSION')
+      ? { telegramMtprotoSession: optionalEnv('TELEGRAM_MTPROTO_SESSION') }
+      : {}),
+    telegramMtprotoMaxConcurrentDownloads,
+    telegramMtprotoRequestSizeBytes,
   }
 }
 

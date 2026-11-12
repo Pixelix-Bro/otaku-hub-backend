@@ -202,7 +202,7 @@ export class TelegramBotApiClient {
     return this.callApi<boolean>('deleteWebhook', { drop_pending_updates: false })
   }
 
-  /** Get file info (for small files only, < 20MB) */
+  /** Hosted Bot API downloads are limited to 20 MB; the Local Bot API supports unlimited downloads. */
   async getFile(fileId: string): Promise<TelegramFile> {
     return this.callApi<TelegramFile>('getFile', { file_id: fileId })
   }

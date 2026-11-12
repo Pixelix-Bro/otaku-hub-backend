@@ -66,7 +66,6 @@ export async function bootstrap(): Promise<ReturnType<typeof Fastify>> {
       status: ready ? 'ready' : 'not_ready',
       mongo: mongoHealthy,
       telegramBot: botHealthy,
-      telegramApiBaseUrl: config.telegramApiBaseUrl,
     })
   })
   app.get('/health', async (_, reply) => {
@@ -82,7 +81,6 @@ export async function bootstrap(): Promise<ReturnType<typeof Fastify>> {
       status: ready ? 'ok' : 'degraded',
       mongo: mongoHealthy,
       telegramBot: botHealthy,
-      telegramApiBaseUrl: config.telegramApiBaseUrl,
       env: config.nodeEnv,
     })
   })

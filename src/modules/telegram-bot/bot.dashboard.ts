@@ -84,11 +84,10 @@ function websiteStatusLabel(probe: WebsiteReadiness): string {
 }
 
 async function getStatistics() {
-  const config = getConfig()
   const media = getDb().collection(COLLECTIONS.MEDIA)
   const active = { deletedAt: null }
   const streamable = {
-    sizeBytes: { $gt: 0, $lte: config.botApiDownloadMaxBytes },
+    sizeBytes: { $gt: 0 },
     telegramFileId: { $type: 'string' },
   }
   const [total, video, photo, audio, documents, ready, processing, failed, size] =

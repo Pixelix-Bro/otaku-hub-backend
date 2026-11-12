@@ -104,7 +104,7 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
 
     const publicBaseUrl = config.publicApiUrl
     const previewUrl =
-      publicBaseUrl && canPreviewMedia(media.sizeBytes, config.botApiDownloadMaxBytes)
+      publicBaseUrl && canPreviewMedia(media.sizeBytes)
         ? buildWatchPageUrl(publicBaseUrl, mediaId, token.token)
         : null
 
@@ -141,8 +141,7 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
     await watchTokens.create({ ...token, usedCount: 0 })
 
     const basePreviewUrl =
-      media.visibility === 'public' &&
-      canPreviewMedia(media.sizeBytes, config.botApiDownloadMaxBytes)
+      media.visibility === 'public' && canPreviewMedia(media.sizeBytes)
         ? buildWatchPageUrl(config.publicApiUrl || config.publicWebUrl, mediaId, token.token)
         : null
 

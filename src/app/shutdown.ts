@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify'
 
 import { logger } from '../infrastructure/logger/logger.js'
 import { disconnectMongoDB } from '../infrastructure/mongodb/client.js'
+import { getTelegramService } from '../infrastructure/telegram/telegram.service.js'
 
 export async function gracefulShutdown(server?: FastifyInstance): Promise<void> {
   logger.info('🛑 Shutting down gracefully...')
@@ -11,6 +12,12 @@ export async function gracefulShutdown(server?: FastifyInstance): Promise<void> 
     logger.info('✅ HTTP server closed')
   } catch (error) {
     logger.error({ error }, '❌ Failed to close HTTP server')
+  }
+
+  try {
+    await getTelegramService().disconnectMtproto()
+  } catch (error) {
+    logger.error({ error }, '❌ Failed to disconnect Telegram MTProto client')
   }
 
   try {

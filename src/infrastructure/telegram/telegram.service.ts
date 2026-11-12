@@ -2,17 +2,20 @@ import { getConfig } from '../../config/env.js'
 import type { TelegramUser } from '../../core/types/index.js'
 import { logger } from '../logger/logger.js'
 import { TelegramBotApiClient } from './bot-api.client.js'
+import { TelegramMtprotoFileReader } from './mtproto-file-reader.js'
 import { StorageChannelService } from './storage-channel.js'
 
 export class TelegramService {
   private readonly botApiClient: TelegramBotApiClient
   private readonly storageChannel: StorageChannelService
+  private readonly mtprotoFileReader: TelegramMtprotoFileReader
   private botInfo: TelegramUser | null = null
 
   constructor() {
     const config = getConfig()
     this.botApiClient = new TelegramBotApiClient(config.telegramBotToken, config.telegramApiBaseUrl)
     this.storageChannel = new StorageChannelService(this.botApiClient, config.telegramStorageChatId)
+    this.mtprotoFileReader = new TelegramMtprotoFileReader(config)
   }
 
   /**
@@ -85,6 +88,14 @@ export class TelegramService {
 
   getStorageChannel(): StorageChannelService {
     return this.storageChannel
+  }
+
+  getMtprotoFileReader(): TelegramMtprotoFileReader {
+    return this.mtprotoFileReader
+  }
+
+  async disconnectMtproto(): Promise<void> {
+    await this.mtprotoFileReader.disconnect()
   }
 
   getBotInfo(): TelegramUser {

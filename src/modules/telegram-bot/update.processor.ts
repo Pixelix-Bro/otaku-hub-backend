@@ -215,7 +215,7 @@ async function processAdminUpload(message: TelegramMessage): Promise<void> {
     await watchTokens.create({ ...token, usedCount: 0 })
 
     const webPreviewUrl =
-      canPreviewMedia(metadata.sizeBytes, config.botApiDownloadMaxBytes) && config.publicApiUrl
+      canPreviewMedia(metadata.sizeBytes) && config.publicApiUrl
         ? buildWatchPageUrl(config.publicApiUrl, media.mediaId, token.token)
         : null
 
@@ -345,11 +345,8 @@ async function processAdminCommand(message: TelegramMessage): Promise<void> {
       return
     }
     const previewSize = media.sizeBytes
-    if (!canPreviewMedia(previewSize, config.botApiDownloadMaxBytes)) {
-      await reply(
-        message,
-        `Web preview faqat ${formatFileSize(config.botApiDownloadMaxBytes)} gacha bo‘lishi kerak. Bu media hajmi katta.`
-      )
+    if (!canPreviewMedia(previewSize)) {
+      await reply(message, 'Web preview uchun media hajmi aniqlanmagan yoki yaroqsiz.')
       return
     }
     if (!config.publicApiUrl) {
@@ -572,11 +569,10 @@ async function processCallback(update: TelegramUpdate): Promise<void> {
         await api.sendMessage(callback.message.chat.id, 'Saqlangan media topilmadi.')
         return
       }
-      const localBotApiConfigured = config.telegramApiBaseUrl !== 'https://api.telegram.org'
-      if (!canPreviewMedia(media.sizeBytes, config.botApiDownloadMaxBytes, localBotApiConfigured)) {
+      if (!canPreviewMedia(media.sizeBytes)) {
         await api.sendMessage(
           callback.message.chat.id,
-          'Streaming uchun media hajmi yoki Local Bot API konfiguratsiyasi tayyor emas.'
+          'Streaming uchun media hajmi noma’lum yoki yaroqsiz.'
         )
         return
       }

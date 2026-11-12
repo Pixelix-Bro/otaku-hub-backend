@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { loadConfig } from '../../config/env.js'
 import { formatFileSize, isMultipartRangeHeader, parseRangeHeader } from '../../core/utils/index.js'
+import { takeExactBytes } from '../../infrastructure/telegram/mtproto-file-reader.js'
 import {
   isAdminTelegramId,
   isValidAdminApiToken,
@@ -20,6 +21,10 @@ import {
   buildWatchPageUrl,
   canPreviewMedia,
   canPreviewPublicly,
+  fetchWithRetry,
+  readByteRange,
+  shouldHonorRange,
+  shouldReturnNotModified,
 } from '../../modules/preview/preview.service.js'
 import { callbackData, escapeHtml } from '../../modules/telegram-bot/bot.dashboard.js'
 import { buildStoredMediaMessage } from '../../modules/telegram-bot/bot.messages.js'
@@ -32,7 +37,7 @@ import {
 } from '../../modules/watch/watch-token.service.js'
 
 describe('Telegram media core', () => {
-  it('configures the hosted Bot API by default and allows the Local Bot API server when configured', () => {
+  it('configures a Local Bot API URL without requiring its server credentials in the backend', () => {
     const env = {
       NODE_ENV: 'production',
       BOT_TOKEN: '123456:ABCDEF_token',
@@ -42,18 +47,20 @@ describe('Telegram media core', () => {
       MONGODB_URI: 'mongodb://localhost:27017',
       MONGODB_DB: 'XENVO',
       MEDIA_LINK_SECRET: 'media-link-secret',
-      TELEGRAM_API_BASE_URL: 'http://telegram-bot-api:8081',
-      TELEGRAM_API_ID: '12345678',
-      TELEGRAM_API_HASH: 'local-bot-api-hash',
+      TELEGRAM_BOT_API_BASE_URL: 'http://telegram-bot-api:8081/',
     }
-    const originalValues = new Map(Object.keys(env).map((key) => [key, process.env[key]]))
+    const keys = [...Object.keys(env), 'TELEGRAM_API_BASE_URL']
+    const originalValues = new Map(keys.map((key) => [key, process.env[key]]))
     Object.assign(process.env, env)
+    delete process.env.TELEGRAM_API_BASE_URL
 
     try {
       const config = loadConfig()
-      expect(config.telegramApiBaseUrl).toBe(env.TELEGRAM_API_BASE_URL)
-      expect(config.telegramApiId).toBe(env.TELEGRAM_API_ID)
-      expect(config.telegramApiHash).toBe(env.TELEGRAM_API_HASH)
+      expect(config.telegramApiBaseUrl).toBe('http://telegram-bot-api:8081')
+
+      delete process.env.TELEGRAM_BOT_API_BASE_URL
+      process.env.TELEGRAM_API_BASE_URL = 'http://legacy-telegram-bot-api:8081'
+      expect(loadConfig().telegramApiBaseUrl).toBe('http://legacy-telegram-bot-api:8081')
     } finally {
       for (const [key, value] of originalValues) {
         if (value === undefined) delete process.env[key]
@@ -180,9 +187,107 @@ describe('Telegram media core', () => {
     })
     expect(parseRangeHeader('bytes=1000000-', 1_000_000)).toBeNull()
     expect(parseRangeHeader('bytes=abc', 1_000_000)).toBeNull()
+    expect(parseRangeHeader('bytes=4294967296-4294967395', 10 * 1024 ** 3)).toEqual({
+      start: 4294967296,
+      end: 4294967395,
+      length: 100,
+      isSuffix: false,
+    })
     expect(isMultipartRangeHeader('bytes=0-10,20-30')).toBe(true)
     expect(isMultipartRangeHeader('bytes=0-10')).toBe(false)
     expect(isMultipartRangeHeader('items=0-10,20-30')).toBe(false)
+  })
+
+  it('streams a requested byte range without buffering the complete upstream media', async () => {
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      yield Buffer.from('0123')
+      yield Buffer.from('4567')
+      yield Buffer.from('89')
+    }
+
+    const result: Uint8Array[] = []
+    for await (const chunk of readByteRange(chunks(), 3, 5)) {
+      result.push(chunk)
+    }
+
+    expect(Buffer.concat(result).toString()).toBe('34567')
+  })
+
+  it('limits MTProto chunks to the requested byte count and rejects truncated reads', async () => {
+    async function* chunks(): AsyncGenerator<Buffer> {
+      yield Buffer.from('abcd')
+      yield Buffer.from('efgh')
+    }
+
+    const output: Buffer[] = []
+    for await (const chunk of takeExactBytes(chunks(), 6)) output.push(chunk)
+    expect(Buffer.concat(output).toString()).toBe('abcdef')
+
+    async function* shortChunks(): AsyncGenerator<Buffer> {
+      yield Buffer.from('abc')
+    }
+    await expect(async () => {
+      for await (const _chunk of takeExactBytes(shortChunks(), 4)) {
+      }
+    }).rejects.toThrow(/ended early/)
+  })
+
+  it('accepts bot-auth MTProto credentials only as a complete API ID/hash pair', () => {
+    const env = {
+      NODE_ENV: 'production',
+      BOT_TOKEN: '123456:ABCDEF_token',
+      TELEGRAM_STORAGE_CHAT_ID: '-1001234567890',
+      TELEGRAM_WEBHOOK_SECRET: 'webhook-secret',
+      TELEGRAM_ADMIN_IDS: '123456789',
+      MONGODB_URI: 'mongodb://localhost:27017',
+      MEDIA_LINK_SECRET: 'media-link-secret',
+      TELEGRAM_MTPROTO_API_ID: '12345678',
+      TELEGRAM_MTPROTO_API_HASH: 'mtproto-api-hash',
+      TELEGRAM_MTPROTO_SESSION: 'opaque-session-secret',
+    }
+    const keys = [...Object.keys(env), 'API_ID', 'API_HASH']
+    const originalValues = new Map(keys.map((key) => [key, process.env[key]]))
+    Object.assign(process.env, env)
+
+    try {
+      const config = loadConfig()
+      expect(config.telegramMtprotoApiId).toBe(12345678)
+      expect(config.telegramMtprotoApiHash).toBe('mtproto-api-hash')
+      expect(config.telegramMtprotoSession).toBe('opaque-session-secret')
+
+      delete process.env.TELEGRAM_MTPROTO_API_HASH
+      expect(() => loadConfig()).toThrow(/must be set together/)
+    } finally {
+      for (const [key, value] of originalValues) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  })
+
+  it('honors HTTP range validators and retries transient stream setup failures', async () => {
+    const updatedAt = new Date('2026-01-02T03:04:05.000Z')
+    const etag = '"stable-etag"'
+    expect(shouldHonorRange(etag, etag, updatedAt)).toBe(true)
+    expect(shouldHonorRange('W/"stable-etag"', etag, updatedAt)).toBe(false)
+    expect(shouldHonorRange('"stale-etag"', etag, updatedAt)).toBe(false)
+    expect(shouldHonorRange(updatedAt.toUTCString(), etag, updatedAt)).toBe(true)
+    expect(shouldReturnNotModified(`W/${etag}`, undefined, etag, updatedAt)).toBe(true)
+    expect(shouldReturnNotModified(undefined, updatedAt.toUTCString(), etag, updatedAt)).toBe(true)
+
+    let attempts = 0
+    const response = await fetchWithRetry(
+      async () => {
+        attempts += 1
+        if (attempts === 1) throw new Error('temporary connection failure')
+        return new Response('ok')
+      },
+      'https://media.example/video',
+      {}
+    )
+
+    expect(attempts).toBe(2)
+    expect(await response.text()).toBe('ok')
   })
 
   it('allows large previews when the Local Bot API server is configured', () => {
@@ -191,11 +296,12 @@ describe('Telegram media core', () => {
     expect(canPreviewPublicly(null, 2048)).toBe(false)
   })
 
-  it('allows large previews when the Local Bot API server is configured', () => {
-    expect(canPreviewMedia(null, 20 * 1024 * 1024, true)).toBe(false)
-    expect(canPreviewMedia(10 * 1024 * 1024, 20 * 1024 * 1024, false)).toBe(true)
-    expect(canPreviewMedia(399 * 1024 * 1024, 20 * 1024 * 1024, false)).toBe(false)
-    expect(canPreviewMedia(399 * 1024 * 1024, 20 * 1024 * 1024, true)).toBe(true)
+  it('allows preview links for large media without an application size cap', () => {
+    expect(canPreviewMedia(null)).toBe(false)
+    expect(canPreviewMedia(0)).toBe(false)
+    for (const megabytes of [19, 20, 21, 100, 500, 1024, 2048, 4096, 10240]) {
+      expect(canPreviewMedia(megabytes * 1024 * 1024)).toBe(true)
+    }
   })
 
   it('builds the canonical backend watch-page URL with an encoded bearer token', () => {
@@ -235,6 +341,23 @@ describe('Telegram media core', () => {
     expect(unsafe['Content-Type']).toBe('application/octet-stream')
     expect(unsafe['Content-Disposition']).not.toContain('\r')
     expect(unsafe['Content-Disposition']).not.toContain('\n')
+
+    const largeHeaders = buildStreamingHeaders({
+      mediaId: 'MED_12345678',
+      fileUniqueId: 'large-file',
+      fileName: 'large-video.mp4',
+      mimeType: 'video/mp4',
+      sizeBytes: 10 * 1024 ** 3,
+      updatedAt: new Date(0),
+      range: {
+        start: 4 * 1024 ** 3,
+        end: 4 * 1024 ** 3 + 1023,
+        length: 1024,
+        isSuffix: false,
+      },
+    })
+    expect(largeHeaders['Content-Length']).toBe('1024')
+    expect(largeHeaders['Content-Range']).toBe('bytes 4294967296-4294968319/10737418240')
   })
 
   it('does not expose Telegram or storage identifiers in public metadata', () => {
