@@ -4,7 +4,10 @@ import { COLLECTIONS } from '../../config/constants.js'
 import { getConfig } from '../../config/env.js'
 import { formatDuration, formatFileSize } from '../../core/utils/index.js'
 import { getDb, isMongoDBHealthy } from '../../infrastructure/mongodb/client.js'
-import { MtprotoWorkerClient } from '../../infrastructure/telegram/mtproto-worker.client.js'
+import {
+  MtprotoWorkerClient,
+  type WorkerReadiness,
+} from '../../infrastructure/telegram/mtproto-worker.client.js'
 import { getTelegramService } from '../../infrastructure/telegram/telegram.service.js'
 import type { MediaDocumentLike } from '../media/media.service.js'
 
@@ -46,14 +49,51 @@ function icon(ok: boolean): string {
   return ok ? '🟢' : '🔴'
 }
 
-async function checkWebsite(url: string): Promise<boolean> {
-  if (!url) return false
+type WebsiteReadiness =
+  | { status: 'not_configured' }
+  | { status: 'available' }
+  | { status: 'http_error'; httpStatus: number }
+  | { status: 'unreachable' }
+
+async function checkWebsite(url: string): Promise<WebsiteReadiness> {
+  if (!url) return { status: 'not_configured' }
   try {
-    const response = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(3_000) })
+    let response = await fetch(url, {
+      method: 'HEAD',
+      signal: AbortSignal.timeout(3_000),
+      redirect: 'follow',
+    })
+    if (response.status === 405 || response.status === 501) {
+      response = await fetch(url, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-0' },
+        signal: AbortSignal.timeout(3_000),
+        redirect: 'follow',
+      })
+    }
+    await response.body?.cancel().catch(() => undefined)
     return response.ok
+      ? { status: 'available' }
+      : { status: 'http_error', httpStatus: response.status }
   } catch {
-    return false
+    return { status: 'unreachable' }
   }
+}
+
+function workerStatusLabel(configured: boolean, probe: WorkerReadiness): string {
+  if (!configured) return 'Sozlanmagan'
+  if (probe.status === 'ready') return 'Online'
+  if (probe.status === 'unauthorized') return 'Secret mos emas (HTTP 403)'
+  if (probe.status === 'not_found') return 'URL yoki /ready yo‘li xato (HTTP 404)'
+  if (probe.status === 'http_error') return `Worker xatosi (HTTP ${probe.httpStatus})`
+  return 'Ulanib bo‘lmayapti: service, private URL yoki portni tekshiring'
+}
+
+function websiteStatusLabel(probe: WebsiteReadiness): string {
+  if (probe.status === 'not_configured') return 'PUBLIC_WEB_URL sozlanmagan'
+  if (probe.status === 'available') return 'Available'
+  if (probe.status === 'http_error') return `Sayt HTTP ${probe.httpStatus} qaytardi`
+  return 'DNS, URL yoki hostingni tekshiring'
 }
 
 async function getStatistics() {
@@ -108,28 +148,35 @@ async function getStatistics() {
 export async function renderDashboard(): Promise<DashboardView> {
   const config = getConfig()
   const workerConfigured = Boolean(config.telegramWorkerUrl && config.telegramWorkerSecret)
-  const websiteConfigured = Boolean(config.publicWebUrl)
-  const [database, telegram, storage, worker, api, website, statistics] = await Promise.all([
-    isMongoDBHealthy().catch(() => false),
-    getTelegramService()
-      .getBotApiClient()
-      .getMe()
-      .then(() => true)
-      .catch(() => false),
-    getTelegramService()
-      .getStorageChannel()
-      .validate()
-      .then(() => true)
-      .catch(() => false),
-    workerConfigured
-      ? new MtprotoWorkerClient(config.telegramWorkerUrl!, config.telegramWorkerSecret!).isReady()
-      : Promise.resolve(false),
-    checkWebsite(`${config.publicApiUrl}/health/live`),
-    checkWebsite(config.publicWebUrl),
-    isMongoDBHealthy()
-      .then((healthy) => (healthy ? getStatistics() : null))
-      .catch(() => null),
-  ])
+  const [database, telegram, storage, workerProbe, apiProbe, websiteProbe, statistics] =
+    await Promise.all([
+      isMongoDBHealthy().catch(() => false),
+      getTelegramService()
+        .getBotApiClient()
+        .getMe()
+        .then(() => true)
+        .catch(() => false),
+      getTelegramService()
+        .getStorageChannel()
+        .validate()
+        .then(() => true)
+        .catch(() => false),
+      workerConfigured
+        ? new MtprotoWorkerClient(
+            config.telegramWorkerUrl!,
+            config.telegramWorkerSecret!
+          ).probeReadiness()
+        : Promise.resolve<WorkerReadiness>({ status: 'unreachable' }),
+      config.publicApiUrl
+        ? checkWebsite(`${config.publicApiUrl}/health/live`)
+        : Promise.resolve<WebsiteReadiness>({ status: 'not_configured' }),
+      checkWebsite(config.publicWebUrl),
+      isMongoDBHealthy()
+        .then((healthy) => (healthy ? getStatistics() : null))
+        .catch(() => null),
+    ])
+  const worker = workerProbe.status === 'ready'
+  const api = apiProbe.status === 'available'
 
   const statisticsText = statistics
     ? `🎬 Jami media: ${statistics.total}\n📦 Saqlangan hajm: ${formatFileSize(statistics.sizeBytes)}\n🟢 Tayyor: ${statistics.ready}\n🟡 Jarayonda: ${statistics.processing}\n🔴 Xatolik: ${statistics.failed}`
@@ -142,10 +189,10 @@ export async function renderDashboard(): Promise<DashboardView> {
     '<b>ASOSIY TIZIM HOLATI</b>',
     `${icon(telegram)} Telegram Bot API: ${telegram ? 'Online' : 'Mavjud emas'}`,
     `${icon(storage)} Telegram Storage: ${storage ? 'Connected' : 'Mavjud emas'}`,
-    `${icon(worker)} MTProto Worker: ${!workerConfigured ? 'Sozlanmagan' : worker ? 'Online' : 'Ulanib bo‘lmayapti'}`,
+    `${icon(worker)} MTProto Worker: ${workerStatusLabel(workerConfigured, workerProbe)}`,
     `${icon(database)} Database: ${database ? 'Online' : 'Mavjud emas'}`,
     `${icon(api)} Media API: ${api ? 'Online' : 'Mavjud emas'}`,
-    `${icon(website)} Website: ${!websiteConfigured ? 'PUBLIC_WEB_URL sozlanmagan' : website ? 'Available' : 'URL javob bermayapti'}`,
+    `${icon(websiteProbe.status === 'available')} Website: ${websiteStatusLabel(websiteProbe)}`,
     '',
     '<b>MEDIA STATISTIKASI</b>',
     statisticsText,
@@ -211,11 +258,14 @@ export async function renderStatistics(): Promise<DashboardView> {
 export async function renderMonitor(): Promise<DashboardView> {
   const config = getConfig()
   const workerConfigured = Boolean(config.telegramWorkerUrl && config.telegramWorkerSecret)
-  const [database, worker, telegram, storage] = await Promise.all([
+  const [database, workerProbe, telegram, storage, websiteProbe] = await Promise.all([
     isMongoDBHealthy().catch(() => false),
     workerConfigured
-      ? new MtprotoWorkerClient(config.telegramWorkerUrl!, config.telegramWorkerSecret!).isReady()
-      : Promise.resolve(false),
+      ? new MtprotoWorkerClient(
+          config.telegramWorkerUrl!,
+          config.telegramWorkerSecret!
+        ).probeReadiness()
+      : Promise.resolve<WorkerReadiness>({ status: 'unreachable' }),
     getTelegramService()
       .getBotApiClient()
       .getMe()
@@ -226,7 +276,9 @@ export async function renderMonitor(): Promise<DashboardView> {
       .validate()
       .then(() => true)
       .catch(() => false),
+    checkWebsite(config.publicWebUrl),
   ])
+  const worker = workerProbe.status === 'ready'
   return {
     text: [
       '🖥 <b>XENVO SYSTEM MONITOR</b>',
@@ -234,10 +286,10 @@ export async function renderMonitor(): Promise<DashboardView> {
       '<b>SERVICES</b>',
       `${icon(telegram)} Telegram Bot API: ${telegram ? 'Online' : 'Mavjud emas'}`,
       `${icon(storage)} Telegram Storage: ${storage ? 'Connected' : 'Mavjud emas'}`,
-      `${icon(worker)} MTProto Worker: ${worker ? 'Online' : 'Mavjud emas'}`,
+      `${icon(worker)} MTProto Worker: ${workerStatusLabel(workerConfigured, workerProbe)}`,
       `${icon(database)} MongoDB: ${database ? 'Online' : 'Mavjud emas'}`,
       'Backend API: Online (ushbu javobdan tasdiqlandi)',
-      'Website media playback: jonli tekshiruv worker/stream holatini talab qiladi.',
+      `${icon(websiteProbe.status === 'available')} Website: ${websiteStatusLabel(websiteProbe)}`,
       `🕒 Tekshirildi: ${new Date().toISOString()}`,
       '━━━━━━━━━━━━━━━━━━━━',
     ].join('\n'),

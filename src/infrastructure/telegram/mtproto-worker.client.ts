@@ -8,6 +8,13 @@ export interface MtprotoMediaInfo {
   file_reference: string | null
 }
 
+export type WorkerReadiness =
+  | { status: 'ready' }
+  | { status: 'unauthorized'; httpStatus: 403 }
+  | { status: 'not_found'; httpStatus: 404 }
+  | { status: 'http_error'; httpStatus: number }
+  | { status: 'unreachable' }
+
 export class MtprotoWorkerClient {
   constructor(
     private readonly baseUrl: string,
@@ -50,14 +57,21 @@ export class MtprotoWorkerClient {
   }
 
   async isReady(): Promise<boolean> {
+    return (await this.probeReadiness()).status === 'ready'
+  }
+
+  async probeReadiness(): Promise<WorkerReadiness> {
     try {
       const response = await fetch(`${this.baseUrl.replace(/\/+$/, '')}/ready`, {
         headers: { 'X-Worker-Secret': this.secret },
         signal: AbortSignal.timeout(3_000),
       })
-      return response.ok
+      if (response.ok) return { status: 'ready' }
+      if (response.status === 403) return { status: 'unauthorized', httpStatus: 403 }
+      if (response.status === 404) return { status: 'not_found', httpStatus: 404 }
+      return { status: 'http_error', httpStatus: response.status }
     } catch {
-      return false
+      return { status: 'unreachable' }
     }
   }
 }
