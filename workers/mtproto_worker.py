@@ -5,31 +5,34 @@ from typing import AsyncIterator
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError, FileReferenceExpiredError, SessionRevokedError
+from telethon.errors import FloodWaitError, FileReferenceExpiredError, RPCError, SessionRevokedError
 
 from chunk_cache import ChunkCache
 from range_math import align_download_window, slice_download_chunk
+from worker_entities import find_dialog_entity
 
 API_ID = int(os.getenv('API_ID', '0') or 0)
 API_HASH = os.getenv('API_HASH', '')
 BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 SESSION_PATH = os.getenv('TELEGRAM_SESSION_PATH', '/data/xenvo_mtproto.session')
 WORKER_SECRET = os.getenv('TELEGRAM_WORKER_SECRET', '')
+STORAGE_CHAT_ID = int(os.getenv('TELEGRAM_STORAGE_CHAT_ID', '0') or 0)
 DEFAULT_CHUNK_BYTES = int(os.getenv('STREAM_CHUNK_BYTES', '524288'))
 CHUNK_CACHE_BYTES = int(os.getenv('MEDIA_CHUNK_CACHE_BYTES', str(64 * 1024 * 1024)))
 MAX_ACTIVE_STREAMS = int(os.getenv('MAX_ACTIVE_STREAMS', '10'))
 
 app = FastAPI(title='XENVO MTProto Worker', version='1.0.0')
 client: TelegramClient | None = None
+storage_entity: object | None = None
 chunk_cache = ChunkCache(CHUNK_CACHE_BYTES)
 active_streams = 0
 
 
 @app.on_event('startup')
 async def startup() -> None:
-    global client
-    if not API_ID or not API_HASH or not BOT_TOKEN or not WORKER_SECRET:
-        raise RuntimeError('MTProto worker requires API_ID, API_HASH, BOT_TOKEN and TELEGRAM_WORKER_SECRET.')
+    global client, storage_entity
+    if not API_ID or not API_HASH or not BOT_TOKEN or not WORKER_SECRET or not STORAGE_CHAT_ID:
+        raise RuntimeError('MTProto worker requires API_ID, API_HASH, BOT_TOKEN, TELEGRAM_WORKER_SECRET, and TELEGRAM_STORAGE_CHAT_ID.')
     if DEFAULT_CHUNK_BYTES < 4096 or DEFAULT_CHUNK_BYTES > 524288 or DEFAULT_CHUNK_BYTES % 4096:
         raise RuntimeError('STREAM_CHUNK_BYTES must be a 4 KiB multiple between 4096 and 524288.')
     if CHUNK_CACHE_BYTES < 0 or MAX_ACTIVE_STREAMS < 1:
@@ -39,12 +42,34 @@ async def startup() -> None:
         os.makedirs(session_dir, exist_ok=True)
     client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
     await client.start(bot_token=BOT_TOKEN)
+    storage_entity = await resolve_storage_entity(STORAGE_CHAT_ID)
 
 
 @app.on_event('shutdown')
 async def shutdown() -> None:
     if client is not None and client.is_connected():
         await client.disconnect()
+
+
+async def resolve_storage_entity(chat_id: int) -> object:
+    global storage_entity
+    if client is None:
+        raise HTTPException(status_code=503, detail='mtproto-worker-not-ready')
+    if chat_id != STORAGE_CHAT_ID:
+        raise HTTPException(status_code=403, detail='storage-chat-not-allowed')
+    if storage_entity is not None:
+        return storage_entity
+
+    try:
+        storage_entity = await client.get_input_entity(chat_id)
+        return storage_entity
+    except (ValueError, TypeError):
+        dialogs = await client.get_dialogs()
+        entity = find_dialog_entity(dialogs, chat_id)
+        if entity is None:
+            raise HTTPException(status_code=403, detail='storage-chat-not-accessible-to-mtproto-bot') from None
+        storage_entity = await client.get_input_entity(entity)
+        return storage_entity
 
 
 @app.get('/health')
@@ -75,7 +100,8 @@ async def media_info(
         raise HTTPException(status_code=503, detail='mtproto-worker-not-ready')
 
     try:
-        message = await client.get_messages(chat_id, ids=message_id)
+        entity = await resolve_storage_entity(chat_id)
+        message = await client.get_messages(entity, ids=message_id)
         if message is None or message.file is None or message.document is None:
             raise HTTPException(status_code=404, detail='source-message-has-no-document')
         document = message.document
@@ -99,6 +125,11 @@ async def media_info(
         raise HTTPException(status_code=429, detail=f'FLOOD_WAIT:{exc.seconds}') from None
     except TimeoutError:
         raise HTTPException(status_code=504, detail='NETWORK_TIMEOUT') from None
+    except RPCError as exc:
+        error_name = type(exc).__name__
+        if error_name in {'ChannelPrivateError', 'ChatAdminRequiredError', 'PeerIdInvalidError'}:
+            raise HTTPException(status_code=403, detail='storage-chat-not-accessible-to-mtproto-bot') from None
+        raise HTTPException(status_code=502, detail=f'TELEGRAM_RPC_ERROR:{error_name[:60]}') from None
 
 
 @app.get('/media-range')
@@ -131,7 +162,8 @@ async def media_range(
             stream_claimed = False
 
     try:
-        message = await client.get_messages(chat_id, ids=message_id)
+        entity = await resolve_storage_entity(chat_id)
+        message = await client.get_messages(entity, ids=message_id)
         if message is None or message.file is None:
             raise HTTPException(status_code=404, detail='source-message-not-found')
         file_size = int(message.file.size or 0)
@@ -171,7 +203,8 @@ async def media_range(
                             refresh_attempts += 1
                             if refresh_attempts > 2:
                                 raise HTTPException(status_code=409, detail='FILE_REFERENCE_EXPIRED') from None
-                            current_message = await client.get_messages(chat_id, ids=message_id)
+                            entity = await resolve_storage_entity(chat_id)
+                            current_message = await client.get_messages(entity, ids=message_id)
                             if current_message is None or current_message.file is None:
                                 raise HTTPException(status_code=404, detail='source-message-not-found') from None
                             continue
@@ -211,6 +244,12 @@ async def media_range(
     except TimeoutError:
         release_stream()
         raise HTTPException(status_code=504, detail='NETWORK_TIMEOUT') from None
+    except RPCError as exc:
+        release_stream()
+        error_name = type(exc).__name__
+        if error_name in {'ChannelPrivateError', 'ChatAdminRequiredError', 'PeerIdInvalidError'}:
+            raise HTTPException(status_code=403, detail='storage-chat-not-accessible-to-mtproto-bot') from None
+        raise HTTPException(status_code=502, detail=f'TELEGRAM_RPC_ERROR:{error_name[:60]}') from None
     except Exception:
         release_stream()
         raise

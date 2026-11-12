@@ -57,8 +57,18 @@ async function checkWebsite(url: string): Promise<boolean> {
 }
 
 async function getStatistics() {
+  const config = getConfig()
   const media = getDb().collection(COLLECTIONS.MEDIA)
   const active = { deletedAt: null }
+  const streamable = {
+    $or: [
+      {
+        sizeBytes: { $gt: 0, $lte: config.botApiDownloadMaxBytes },
+        telegramFileId: { $type: 'string' },
+      },
+      { mtprotoStatus: 'available' },
+    ],
+  }
   const [total, video, photo, audio, documents, ready, processing, failed, size] =
     await Promise.all([
       media.countDocuments(active),
@@ -66,9 +76,15 @@ async function getStatistics() {
       media.countDocuments({ ...active, mediaType: 'photo' }),
       media.countDocuments({ ...active, mediaType: 'audio' }),
       media.countDocuments({ ...active, mediaType: 'document' }),
-      media.countDocuments({ ...active, storageStatus: 'stored', mtprotoStatus: 'available' }),
+      media.countDocuments({ ...active, storageStatus: 'stored', ...streamable }),
       media.countDocuments({ ...active, storageStatus: { $in: ['pending', 'copying'] } }),
-      media.countDocuments({ ...active, storageStatus: { $in: ['copy_failed', 'copy_unknown'] } }),
+      media.countDocuments({
+        ...active,
+        $or: [
+          { storageStatus: { $in: ['copy_failed', 'copy_unknown'] } },
+          { mtprotoStatus: 'unavailable' },
+        ],
+      }),
       media
         .aggregate([
           { $match: { ...active, storageStatus: 'stored' } },
@@ -92,6 +108,7 @@ async function getStatistics() {
 export async function renderDashboard(): Promise<DashboardView> {
   const config = getConfig()
   const workerConfigured = Boolean(config.telegramWorkerUrl && config.telegramWorkerSecret)
+  const websiteConfigured = Boolean(config.publicWebUrl)
   const [database, telegram, storage, worker, api, website, statistics] = await Promise.all([
     isMongoDBHealthy().catch(() => false),
     getTelegramService()
@@ -125,10 +142,10 @@ export async function renderDashboard(): Promise<DashboardView> {
     '<b>ASOSIY TIZIM HOLATI</b>',
     `${icon(telegram)} Telegram Bot API: ${telegram ? 'Online' : 'Mavjud emas'}`,
     `${icon(storage)} Telegram Storage: ${storage ? 'Connected' : 'Mavjud emas'}`,
-    `${icon(worker)} MTProto Worker: ${worker ? 'Online' : 'Mavjud emas'}`,
+    `${icon(worker)} MTProto Worker: ${!workerConfigured ? 'Sozlanmagan' : worker ? 'Online' : 'Ulanib bo‘lmayapti'}`,
     `${icon(database)} Database: ${database ? 'Online' : 'Mavjud emas'}`,
     `${icon(api)} Media API: ${api ? 'Online' : 'Mavjud emas'}`,
-    `${icon(website)} Website: ${website ? 'Available' : 'Mavjud emas'}`,
+    `${icon(website)} Website: ${!websiteConfigured ? 'PUBLIC_WEB_URL sozlanmagan' : website ? 'Available' : 'URL javob bermayapti'}`,
     '',
     '<b>MEDIA STATISTIKASI</b>',
     statisticsText,

@@ -202,8 +202,14 @@ async function processAdminUpload(message: TelegramMessage): Promise<void> {
         config.telegramWorkerUrl,
         config.telegramWorkerSecret
       ).getMediaInfo(config.telegramStorageChatId, storageMessageId)
-    } catch {
-      logger.warn({ mediaId: media.mediaId }, 'MTProto could not resolve uploaded storage media')
+    } catch (error) {
+      logger.warn(
+        {
+          mediaId: media.mediaId,
+          workerFailure: error instanceof Error ? error.message : 'unknown-worker-error',
+        },
+        'MTProto could not resolve uploaded storage media'
+      )
     }
   }
 

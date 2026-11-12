@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
   && mkdir -p /data \
   && chown worker:worker /data
 
-COPY workers/mtproto_worker.py workers/range_math.py workers/chunk_cache.py ./workers/
+COPY workers/mtproto_worker.py workers/range_math.py workers/chunk_cache.py workers/worker_entities.py ./workers/
 USER worker
 
 EXPOSE 8000

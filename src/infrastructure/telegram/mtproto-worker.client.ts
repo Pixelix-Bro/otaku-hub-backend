@@ -24,7 +24,16 @@ export class MtprotoWorkerClient {
       signal: AbortSignal.timeout(15_000),
     })
     if (!response.ok) {
-      throw new Error(`MTProto worker media resolution failed (${response.status}).`)
+      let detail = ''
+      try {
+        const body = (await response.json()) as { detail?: unknown }
+        if (typeof body.detail === 'string' && /^[A-Za-z0-9_:-]{1,80}$/.test(body.detail)) {
+          detail = ` ${body.detail}`
+        }
+      } catch {
+        detail = ''
+      }
+      throw new Error(`MTProto worker media resolution failed (${response.status}${detail}).`)
     }
 
     const data = (await response.json()) as MtprotoMediaInfo
