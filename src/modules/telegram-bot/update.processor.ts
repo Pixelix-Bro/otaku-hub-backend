@@ -189,12 +189,7 @@ async function processAdminUpload(message: TelegramMessage): Promise<void> {
     throw error
   }
 
-  const workerConfigured = Boolean(
-    config.telegramWorkerUrl &&
-    config.telegramWorkerSecret &&
-    config.mtprotoApiId &&
-    config.mtprotoApiHash
-  )
+  const workerConfigured = Boolean(config.telegramWorkerUrl && config.telegramWorkerSecret)
   let mtprotoInfo: Awaited<ReturnType<MtprotoWorkerClient['getMediaInfo']>> | null = null
   if (workerConfigured && config.telegramWorkerUrl && config.telegramWorkerSecret) {
     try {
@@ -381,12 +376,7 @@ async function processAdminCommand(message: TelegramMessage): Promise<void> {
       await reply(message, 'Stored media topilmadi. Foydalanish: /preview MEDIA_ID')
       return
     }
-    const workerConfigured = Boolean(
-      config.telegramWorkerUrl &&
-      config.telegramWorkerSecret &&
-      config.mtprotoApiId &&
-      config.mtprotoApiHash
-    )
+    const workerConfigured = Boolean(config.telegramWorkerUrl && config.telegramWorkerSecret)
     let previewSize = media.sizeBytes
     let largeFileWorkerReady = media.mtprotoStatus === 'available'
     if (
@@ -421,7 +411,7 @@ async function processAdminCommand(message: TelegramMessage): Promise<void> {
           },
           'MTProto could not refresh preview media metadata'
         )
-        
+
         largeFileWorkerReady = false
       }
     }

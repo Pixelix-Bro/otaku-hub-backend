@@ -18,8 +18,6 @@ export interface AppConfig {
   watchTokenTtlSeconds: number
   maxWatchTokenUses: number
   logLevel: string
-  mtprotoApiId?: number
-  mtprotoApiHash?: string
   telegramSessionPath?: string
   telegramWorkerUrl?: string
   telegramWorkerSecret?: string
@@ -92,28 +90,16 @@ export function loadConfig(): AppConfig {
     throw new Error('❌ BOT_API_DOWNLOAD_MAX_BYTES must be a positive integer below 20 MiB.')
   }
 
-  const mtprotoApiIdRaw = optionalEnv('API_ID')
-  const mtprotoApiHashRaw = optionalEnv('API_HASH')
   const telegramWorkerUrlRaw = optionalEnv('TELEGRAM_WORKER_URL')
   const telegramWorkerSecretRaw = optionalEnv('TELEGRAM_WORKER_SECRET')
-  const mtprotoValues = [
-    mtprotoApiIdRaw,
-    mtprotoApiHashRaw,
-    telegramWorkerUrlRaw,
-    telegramWorkerSecretRaw,
-  ]
-  const mtprotoConfiguredCount = mtprotoValues.filter(Boolean).length
-  if (mtprotoConfiguredCount !== 0 && mtprotoConfiguredCount !== mtprotoValues.length) {
+  const workerValues = [telegramWorkerUrlRaw, telegramWorkerSecretRaw]
+  const workerConfiguredCount = workerValues.filter(Boolean).length
+  if (workerConfiguredCount !== 0 && workerConfiguredCount !== workerValues.length) {
     throw new Error(
-      'Configure API_ID, API_HASH, TELEGRAM_WORKER_URL, and TELEGRAM_WORKER_SECRET together to enable MTProto streaming.'
+      'Configure TELEGRAM_WORKER_URL and TELEGRAM_WORKER_SECRET together to enable MTProto streaming.'
     )
   }
 
-  const mtprotoApiId = mtprotoApiIdRaw ? Number(mtprotoApiIdRaw) : undefined
-  if (mtprotoApiIdRaw && (!Number.isSafeInteger(mtprotoApiId) || (mtprotoApiId ?? 0) <= 0)) {
-    throw new Error('API_ID must be a positive integer.')
-  }
-  const mtprotoApiHash = mtprotoApiHashRaw || undefined
   const telegramWorkerUrl = telegramWorkerUrlRaw.replace(/\/+$/, '') || undefined
   if (telegramWorkerUrl) {
     let parsedWorkerUrl: URL
@@ -158,8 +144,6 @@ export function loadConfig(): AppConfig {
     watchTokenTtlSeconds: Number(optionalEnv('WATCH_TOKEN_TTL_SECONDS', '3600')),
     maxWatchTokenUses: Number(optionalEnv('MAX_WATCH_TOKEN_USES', '10')),
     logLevel: optionalEnv('LOG_LEVEL', 'info'),
-    mtprotoApiId,
-    mtprotoApiHash,
     telegramSessionPath: optionalEnv('TELEGRAM_SESSION_PATH', '/data/xenvo_mtproto.session'),
     telegramWorkerUrl,
     telegramWorkerSecret,
